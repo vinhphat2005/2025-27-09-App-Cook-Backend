@@ -467,8 +467,13 @@ class CookingAPI:
 # ============================================================================
 
 if __name__ == "__main__":
-    # Khởi tạo API
-    api = CookingAPI("AIzaSyAZJL6ixCrGbjn9x7ZtXimRhxjb-51Xxzg")
+    # Khởi tạo API từ environment variable
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        print("Error: Please set GOOGLE_API_KEY environment variable")
+        exit(1)
+    
+    api = CookingAPI(api_key)
     
     print("=== Test Ingredient Correction ===")
     result = api.correct_ingredient_endpoint("ca chua")
