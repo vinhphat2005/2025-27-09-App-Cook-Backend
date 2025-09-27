@@ -1,0 +1,7 @@
+.env
+serviceAccountKey.json
+# Bỏ file biên dịch Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd   
