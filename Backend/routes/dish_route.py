@@ -33,7 +33,7 @@ cloudinary.config(
     secure=True
 )
 
-print(f"Cloudinary configured with cloud_name: {CLOUDINARY_CLOUD_NAME}")
+print("Cloudinary configured successfully")
 
 router = APIRouter()
 
@@ -103,7 +103,8 @@ def _clean_dish_data(dish_dict: dict) -> dict:
 
 async def upload_image_to_cloudinary(image_b64: str, image_mime: str, folder: str = "dishes") -> str:
     try:
-        logging.info(f"Uploading to Cloudinary - Cloud: {CLOUDINARY_CLOUD_NAME}, Folder: {folder}")
+        # KHÔNG log thông tin cấu hình để tránh rò rỉ
+        logging.info(f"Uploading image to cloud storage, folder: {folder}")
         
         image_data = base64.b64decode(image_b64)
         
@@ -121,7 +122,8 @@ async def upload_image_to_cloudinary(image_b64: str, image_mime: str, folder: st
         return upload_result["secure_url"]
         
     except Exception as e:
-        logging.error(f"Failed to upload image to Cloudinary (Cloud: {CLOUDINARY_CLOUD_NAME}): {str(e)}")
+        # KHÔNG log thông tin cấu hình để tránh rò rỉ
+        logging.error(f"Failed to upload image to cloud storage: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to upload image: {str(e)}")
 
 def get_optimized_image_url(public_id: str, width: int = None, height: int = None, crop: str = "auto") -> str:
