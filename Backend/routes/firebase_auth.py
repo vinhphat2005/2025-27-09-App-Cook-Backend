@@ -9,12 +9,16 @@ import os
 @lru_cache()
 def init_firebase():
     if not firebase_admin._apps:  # Kiểm tra đã init chưa
-        # Có thể dùng service account key file hoặc environment
-        if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        # Đọc service account key
+        if os.path.exists("serviceAccountKey.json"):
+            cred = credentials.Certificate("serviceAccountKey.json")
+        elif os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
             cred = credentials.ApplicationDefault()
         else:
-            cred = credentials.Certificate("path/to/serviceAccountKey.json")  
+            raise Exception("Firebase credentials not found!")
+        
         firebase_admin.initialize_app(cred)
+        print("✅ Firebase Admin SDK initialized")
 
 # Bảo vệ endpoint bằng Bearer token
 security = HTTPBearer()
@@ -28,7 +32,7 @@ def verify_firebase_token(credentials: HTTPAuthorizationCredentials = Depends(se
             token, 
             clock_skew_seconds=60  # Chấp nhận lệch 60 giây
         )
-        return decoded_token  # chứa 'email', 'uid', v.v.
+        return decoded_token  # chứa 'email', 'uid', 'name', 'picture'
     except auth.InvalidIdTokenError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -42,5 +46,5 @@ def verify_firebase_token(credentials: HTTPAuthorizationCredentials = Depends(se
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication failed"
+            detail=f"Authentication failed: {str(e)}"
         )

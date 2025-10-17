@@ -9,9 +9,17 @@ from models.recipe_model import RecipeOut
 from models.user_model import UserOut
 from models.dish_model import DishOut
 from core.user_management.service import user_helper
+import re
 
 
 router = APIRouter()
+
+
+def escape_regex(query: str) -> str:
+    """
+    Escape special regex characters to prevent regex injection attacks
+    """
+    return re.escape(query.strip())
 
 
 # ================== BASIC SEARCH ==================
@@ -19,11 +27,17 @@ router = APIRouter()
 @router.get("/ingredients", response_model=list[IngredientOut])
 async def search_ingredients(q: str = Query(..., min_length=1)):
     """
-    Tìm kiếm nguyên liệu theo tên
+    Tìm kiếm nguyên liệu theo tên - SECURE VERSION
     """
-    regex = {"$regex": q, "$options": "i"}
-    cursor = ingredients_collection.find({"name": regex}).limit(10)
+    # ✅ Escape regex để tránh injection
+    safe_q = escape_regex(q)
+    regex = {"$regex": safe_q, "$options": "i"}
+    
+    # ✅ Dùng projection để chỉ lấy fields cần thiết
+    projection = {"name": 1, "category": 1, "unit": 1}
+    cursor = ingredients_collection.find({"name": regex}, projection).limit(10)
     ingredients = await cursor.to_list(length=10)
+    
     return [
         {
             "id": str(i["_id"]),
@@ -37,28 +51,41 @@ async def search_ingredients(q: str = Query(..., min_length=1)):
 @router.get("/users", response_model=list[UserOut])
 async def search_users(q: str = Query(..., min_length=1)):
     """
-    Tìm kiếm người dùng theo display_id
+    Tìm kiếm người dùng theo display_id - SECURE VERSION
     """
-    regex = {"$regex": q, "$options": "i"}
-    cursor = users_collection.find({"display_id": regex}).limit(10)
+    # ✅ Escape regex để tránh injection
+    safe_q = escape_regex(q)
+    regex = {"$regex": safe_q, "$options": "i"}
+    
+    # ✅ Projection để tối ưu performance
+    projection = {"display_id": 1, "name": 1, "avatar": 1, "email": 1, "bio": 1, "createdAt": 1, "lastLoginAt": 1}
+    cursor = users_collection.find({"display_id": regex}, projection).limit(10)
     users = await cursor.to_list(length=10)
     
-    # Sử dụng user_helper để format consistent với normalized structure
+    # ✅ Sử dụng user_helper để format consistent với normalized structure
     return [user_helper(u) for u in users]
 
 
 @router.get("/dishes", response_model=list[DishOut])
 async def search_dishes(q: str = Query(..., min_length=1)):
     """
-    Tìm kiếm món ăn theo tên hoặc nguyên liệu
+    Tìm kiếm món ăn theo tên hoặc nguyên liệu - SECURE VERSION
     """
-    regex = {"$regex": q, "$options": "i"}
+    # ✅ Escape regex để tránh injection
+    safe_q = escape_regex(q)
+    regex = {"$regex": safe_q, "$options": "i"}
+    
+    # ✅ Dùng projection để tối ưu performance
+    projection = {"name": 1, "image_url": 1, "cooking_time": 1, "average_rating": 1, "ingredients": 1}
+    
+    # ✅ Đơn giản hóa $elemMatch query (không cần thiết cho mảng strings)
     cursor = dishes_collection.find({
         "$or": [
             {"name": regex},
-            {"ingredients": {"$elemMatch": {"$regex": q, "$options": "i"}}}
+            {"ingredients": regex}  # Đơn giản hơn $elemMatch
         ]
-    }).limit(10)
+    }, projection).limit(10)
+    
     dishes = await cursor.to_list(length=10)
     return [
         {
@@ -74,15 +101,26 @@ async def search_dishes(q: str = Query(..., min_length=1)):
 @router.get("/recipes", response_model=list[RecipeOut])
 async def search_recipes(q: str = Query(..., min_length=1)):
     """
-    Tìm kiếm công thức theo tên hoặc mô tả
+    Tìm kiếm công thức theo tên hoặc mô tả - SECURE VERSION
     """
-    regex = {"$regex": q, "$options": "i"}
+    # ✅ Escape regex để tránh injection
+    safe_q = escape_regex(q)
+    regex = {"$regex": safe_q, "$options": "i"}
+    
+    # ✅ Projection để tối ưu performance
+    projection = {
+        "name": 1, "description": 1, "ingredients": 1, "difficulty": 1, 
+        "image_url": 1, "instructions": 1, "dish_id": 1, "created_by": 1, 
+        "ratings": 1, "average_rating": 1
+    }
+    
     cursor = recipe_collection.find({
         "$or": [
             {"name": regex},
             {"description": regex}
         ]
-    }).limit(10)
+    }, projection).limit(10)
+    
     recipes = await cursor.to_list(length=10)
     return [
         {
@@ -113,13 +151,13 @@ async def filter_dishes_by_time(
     cursor = dishes_collection.find({"cooking_time": {"$lte": max_time}})
     dishes = await cursor.to_list(length=50)
     return [
-        DishOut(
-            id=str(d.get("_id", "")),
-            name=d.get("name", ""),
-            image_url=d.get("image_url", ""),
-            cooking_time=d.get("cooking_time", 0),
-            average_rating=d.get("average_rating", 0.0),
-        )
+        {
+            "id": str(d.get("_id", "")),
+            "name": d.get("name", ""),
+            "image_url": d.get("image_url", ""),
+            "cooking_time": d.get("cooking_time", 0),
+            "average_rating": d.get("average_rating", 0.0),
+        }
         for d in dishes
     ]
 
@@ -138,13 +176,13 @@ async def filter_dishes_by_time_rating(
     })
     dishes = await cursor.to_list(length=50)
     return [
-        DishOut(
-            id=str(d.get("_id", "")),
-            name=d.get("name", ""),
-            image_url=d.get("image_url", ""),
-            cooking_time=d.get("cooking_time", 0),
-            average_rating=d.get("average_rating", 0.0),
-        )
+        {
+            "id": str(d.get("_id", "")),
+            "name": d.get("name", ""),
+            "image_url": d.get("image_url", ""),
+            "cooking_time": d.get("cooking_time", 0),
+            "average_rating": d.get("average_rating", 0.0),
+        }
         for d in dishes
     ]
 
@@ -162,41 +200,45 @@ async def filter_dishes_by_difficulty(
     cursor = dishes_collection.find({"difficulty": difficulty})
     dishes = await cursor.to_list(length=50)
     return [
-        DishOut(
-            id=str(d.get("_id", "")),
-            name=d.get("name", ""),
-            image_url=d.get("image_url", ""),
-            cooking_time=d.get("cooking_time", 0),
-            average_rating=d.get("average_rating", 0.0),
-        )
+        {
+            "id": str(d.get("_id", "")),
+            "name": d.get("name", ""),
+            "image_url": d.get("image_url", ""),
+            "cooking_time": d.get("cooking_time", 0),
+            "average_rating": d.get("average_rating", 0.0),
+        }
         for d in dishes
     ]
 
 
 # ================== COMBINED SEARCH ==================
 
-# ✅ Cập nhật search_all function
+# ✅ Cập nhật search_all function - SECURE VERSION
 @router.get("/all")
 async def search_all(q: str = Query(..., min_length=2)):
     """
-    Tìm kiếm tổng hợp - tất cả loại data
+    Tìm kiếm tổng hợp - tất cả loại data - SECURE VERSION
     """
-    regex = {"$regex": q, "$options": "i"}
+    # ✅ Escape regex để tránh injection
+    safe_q = escape_regex(q)
+    regex = {"$regex": safe_q, "$options": "i"}
     
+    # ✅ Tối ưu với projection cho từng collection
+    dishes_projection = {"name": 1, "image_url": 1, "cooking_time": 1, "ingredients": 1}
     dishes_cursor = dishes_collection.find({
         "$or": [
             {"name": regex},
-            {"ingredients": {"$elemMatch": {"$regex": q, "$options": "i"}}}
+            {"ingredients": regex}  # Đơn giản hóa $elemMatch
         ]
-    }).limit(5)
+    }, dishes_projection).limit(5)
     dishes = await dishes_cursor.to_list(length=5)
     
-  
-    users_cursor = users_collection.find({"display_id": regex}).limit(5)
+    users_projection = {"display_id": 1, "name": 1, "avatar": 1, "email": 1, "bio": 1, "createdAt": 1, "lastLoginAt": 1}
+    users_cursor = users_collection.find({"display_id": regex}, users_projection).limit(5)
     users = await users_cursor.to_list(length=5)
     
-
-    ingredients_cursor = ingredients_collection.find({"name": regex}).limit(5)
+    ingredients_projection = {"name": 1, "category": 1}
+    ingredients_cursor = ingredients_collection.find({"name": regex}, ingredients_projection).limit(5)
     ingredients = await ingredients_cursor.to_list(length=5)
     
     return {
@@ -211,13 +253,8 @@ async def search_all(q: str = Query(..., min_length=2)):
             } for d in dishes
         ],
         "users": [
-            {
-                "id": str(u["_id"]),
-                "name": u.get("name", u["display_id"]),
-                "type": "user",
-                "display_id": u["display_id"],
-                "avatar": u.get("avatar", "")
-            } for u in users
+            # ✅ Sử dụng user_helper để consistency
+            {**user_helper(u), "type": "user"} for u in users
         ],
         "ingredients": [
             {
@@ -230,13 +267,13 @@ async def search_all(q: str = Query(..., min_length=2)):
         "total_results": len(dishes) + len(users) + len(ingredients)
     }
 
-# Cập nhật endpoint dishes-by-ingredients
+# Cập nhật endpoint dishes-by-ingredients - SECURE VERSION
 @router.get("/dishes-by-ingredients")
 async def search_dishes_by_ingredients(
     ingredients: str = Query("", description="Comma-separated ingredients")
 ):
     """
-    Tìm món ăn theo nhiều nguyên liệu (GET với query params)
+    Tìm món ăn theo nhiều nguyên liệu (GET với query params) - SECURE VERSION
     """
     # Parse ingredients từ string
     ingredient_list = [ing.strip() for ing in ingredients.split(',') if ing.strip()]
@@ -244,15 +281,19 @@ async def search_dishes_by_ingredients(
     if not ingredient_list:
         return {"dishes": [], "total_results": 0}
     
-    # ✅ Sửa query syntax
+    # ✅ Escape regex cho từng ingredient để tránh injection
     or_conditions = []
     for ing in ingredient_list:
-        or_conditions.append({"ingredients": {"$regex": ing, "$options": "i"}})
+        safe_ing = escape_regex(ing)
+        or_conditions.append({"ingredients": {"$regex": safe_ing, "$options": "i"}})
+    
+    # ✅ Tối ưu với projection
+    projection = {"name": 1, "image_url": 1, "cooking_time": 1, "average_rating": 1, "ingredients": 1}
     
     # Tìm dishes có chứa ít nhất 1 ingredient
     cursor = dishes_collection.find({
         "$or": or_conditions
-    })
+    }, projection)
     
     dishes = await cursor.to_list(length=50)
     

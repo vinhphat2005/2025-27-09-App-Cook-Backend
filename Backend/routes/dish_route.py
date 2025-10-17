@@ -4,7 +4,7 @@ from models.dish_model import Dish, DishOut, DishIn
 from models.dish_with_recipe_model import DishWithRecipeIn, DishWithRecipeOut
 from database.mongo import dishes_collection, users_collection, recipe_collection
 from bson import ObjectId
-from datetime import datetime
+from datetime import datetime, timezone
 from core.auth.dependencies import get_current_user, get_user_by_email, extract_user_email
 from typing import List, Optional, Dict
 from pydantic import BaseModel
@@ -18,22 +18,33 @@ import io
 import logging
 load_dotenv() 
 
-# Load Cloudinary credentials từ environment variables
-CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
-CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
-CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")
+# ✅ Safer Cloudinary configuration - check at startup, not import
+def _configure_cloudinary():
+    """Configure Cloudinary with proper error handling"""
+    CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
+    CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
+    CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")
 
-if not all([CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET]):
-    raise ValueError("Missing Cloudinary credentials. Please set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET in your environment variables.")
+    if not all([CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET]):
+        # In development, log warning but don't crash
+        if os.getenv("DEBUG", "False").lower() == "true":
+            logging.warning("Cloudinary credentials not set. Image upload will be disabled.")
+            return False
+        else:
+            raise ValueError("Missing Cloudinary credentials. Please set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET in your environment variables.")
 
-cloudinary.config(
-    cloud_name=CLOUDINARY_CLOUD_NAME,
-    api_key=CLOUDINARY_API_KEY,
-    api_secret=CLOUDINARY_API_SECRET,
-    secure=True
-)
+    cloudinary.config(
+        cloud_name=CLOUDINARY_CLOUD_NAME,
+        api_key=CLOUDINARY_API_KEY,
+        api_secret=CLOUDINARY_API_SECRET,
+        secure=True
+    )
+    
+    logging.info("Cloudinary configured successfully")
+    return True
 
-print("Cloudinary configured successfully")
+# Configure at module load
+CLOUDINARY_ENABLED = _configure_cloudinary()
 
 router = APIRouter()
 
@@ -98,15 +109,27 @@ def _clean_dish_data(dish_dict: dict) -> dict:
     cleaned.setdefault("ratings", [])
     cleaned.setdefault("average_rating", 0.0)
     cleaned.setdefault("liked_by", [])
-    cleaned.setdefault("created_at", datetime.utcnow())
+    # ✅ Fix: Use timezone-aware datetime
+    cleaned.setdefault("created_at", datetime.now(timezone.utc))
     return cleaned
 
-async def upload_image_to_cloudinary(image_b64: str, image_mime: str, folder: str = "dishes") -> str:
+async def upload_image_to_cloudinary(image_b64: str, image_mime: str, folder: str = "dishes") -> dict:
+    """
+    Upload image to Cloudinary and return both secure_url and public_id
+    """
     try:
-        # KHÔNG log thông tin cấu hình để tránh rò rỉ
+        # ✅ Check if Cloudinary is enabled
+        if not CLOUDINARY_ENABLED:
+            raise HTTPException(status_code=503, detail="Image upload service not available")
+        
         logging.info(f"Uploading image to cloud storage, folder: {folder}")
         
+        # ✅ Add basic size validation
         image_data = base64.b64decode(image_b64)
+        
+        # Check file size (limit to 10MB)
+        if len(image_data) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Image too large. Max size is 10MB.")
         
         upload_result = cloudinary.uploader.upload(
             image_data,
@@ -119,10 +142,17 @@ async def upload_image_to_cloudinary(image_b64: str, image_mime: str, folder: st
         )
         
         logging.info(f"Successfully uploaded image: {upload_result['secure_url']}")
-        return upload_result["secure_url"]
         
+        # ✅ Return both secure_url and public_id for flexibility
+        return {
+            "secure_url": upload_result["secure_url"],
+            "public_id": upload_result["public_id"],
+            "url": upload_result["secure_url"]  # For backward compatibility
+        }
+        
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
     except Exception as e:
-        # KHÔNG log thông tin cấu hình để tránh rò rỉ
         logging.error(f"Failed to upload image to cloud storage: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to upload image: {str(e)}")
 
@@ -165,23 +195,40 @@ def _get_user_identification(user_doc):
     
     return user_id, user_email, user_username
 
+def _validate_object_id(id_str: str, field_name: str = "ID") -> ObjectId:
+    """
+    Validate and convert string to ObjectId
+    Raises HTTPException if invalid
+    """
+    if not id_str or not isinstance(id_str, str):
+        raise HTTPException(status_code=400, detail=f"Invalid {field_name}: empty or not string")
+    
+    if not ObjectId.is_valid(id_str):
+        raise HTTPException(status_code=400, detail=f"Invalid {field_name} format")
+    
+    try:
+        return ObjectId(id_str)
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"Invalid {field_name} format")
+
 # ============= ROUTES (CORRECT ORDER) =============
 
 # POST routes first
 @router.post("/", response_model=DishOut)
 async def create_dish(dish: DishIn, decoded=Depends(get_current_user)):
     user_email = extract_user_email(decoded)
-    user = await get_user_by_email(user_email)
+    user = await get_user_by_email(user_email, decoded)  # ✅ Pass decoded token
 
     payload = dish.dict()
     
     image_url = None
     if payload.get("image_b64") and payload.get("image_mime"):
-        image_url = await upload_image_to_cloudinary(
+        upload_result = await upload_image_to_cloudinary(
             payload["image_b64"], 
             payload["image_mime"], 
             folder="dishes"
         )
+        image_url = upload_result["secure_url"]
 
     new_doc = _clean_dish_data({
         "name": payload["name"],
@@ -200,13 +247,17 @@ async def create_dish(dish: DishIn, decoded=Depends(get_current_user)):
         id=str(result.inserted_id),
         name=new_doc["name"],
         cooking_time=new_doc["cooking_time"],
+        ingredients=new_doc.get("ingredients", []),  # ✅ Fix: Include ingredients for frontend
         average_rating=new_doc.get("average_rating", 0.0),
+        image_url=new_doc.get("image_url", None),  # ✅ Fix: Use None instead of empty string
+        creator_id=new_doc.get("creator_id"),
+        created_at=new_doc.get("created_at")
     )
 
 @router.post("/with-recipe", response_model=DishWithRecipeOut)
 async def create_dish_with_recipe(data: DishWithRecipeIn, decoded=Depends(get_current_user)):
     user_email = extract_user_email(decoded)
-    user = await get_user_by_email(user_email)
+    user = await get_user_by_email(user_email, decoded)  # ✅ Pass decoded token
 
     difficulty_map = {
         "Dễ": "easy",
@@ -221,11 +272,12 @@ async def create_dish_with_recipe(data: DishWithRecipeIn, decoded=Depends(get_cu
     
     image_url = None
     if image_b64 and image_mime:
-        image_url = await upload_image_to_cloudinary(
+        upload_result = await upload_image_to_cloudinary(
             image_b64, 
             image_mime, 
             folder="dishes"
         )
+        image_url = upload_result["secure_url"]
 
     dish_doc = _clean_dish_data({
         "name": data.name,
@@ -253,7 +305,8 @@ async def create_dish_with_recipe(data: DishWithRecipeIn, decoded=Depends(get_cu
         "ratings": [],
         "average_rating": 0.0,
         "image_url": image_url,
-        "created_at": datetime.utcnow(),
+        # ✅ Fix: Use timezone-aware datetime
+        "created_at": datetime.now(timezone.utc),
     }
     
     recipe_result = await recipe_collection.insert_one(recipe_doc)
@@ -276,65 +329,172 @@ async def create_dish_with_recipe(data: DishWithRecipeIn, decoded=Depends(get_cu
 
 @router.post("/check-favorites", response_model=Dict[str, bool])
 async def check_favorites(request: CheckFavoritesRequest, decoded=Depends(get_current_user)):
+    import logging
+    logger = logging.getLogger(__name__)
+    
     try:
         user_email = extract_user_email(decoded)
-        user = await get_user_by_email(user_email)
+        logger.info(f"🔍 Check favorites - User email: {user_email}")
         
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+        # ✅ Use get_user_by_email for consistency
+        user = await get_user_by_email(user_email, decoded)  # ✅ Pass decoded token
+        logger.info(f"✅ User found: {user.get('_id')} - {user.get('email')}")
         
         favorite_dish_ids = user.get("favorite_dishes", [])
+        logger.info(f"📋 User has {len(favorite_dish_ids)} favorite dishes")
         
         result = {}
         for dish_id in request.dish_ids:
             result[dish_id] = dish_id in favorite_dish_ids
             
+        logger.info(f"✅ Check favorites result: {len(result)} dishes checked")
         return result
         
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions  
     except Exception as e:
-        logging.error(f"Error checking favorites: {str(e)}")
+        logger.error(f"❌ Error checking favorites: {str(e)}")
+        logger.error(f"📧 User email: {decoded.get('email', 'N/A')}")
+        logger.error(f"🆔 User UID: {decoded.get('uid', 'N/A')}")
         raise HTTPException(status_code=500, detail=f"Failed to check favorites: {str(e)}")
 
 @router.post("/{dish_id}/rate")
 async def rate_dish(dish_id: str, rating: int, decoded=Depends(get_current_user)):
     if rating < 1 or rating > 5:
         raise HTTPException(status_code=400, detail="Rating must be 1-5")
-    d = await dishes_collection.find_one({"_id": ObjectId(dish_id)})
+    
+    # ✅ Validate ObjectId before using
+    dish_oid = _validate_object_id(dish_id, "dish_id")
+    
+    # ✅ Check dish exists first
+    d = await dishes_collection.find_one({"_id": dish_oid})
     if not d:
         raise HTTPException(status_code=404, detail="Dish not found")
-    ratings = d.get("ratings", [])
-    ratings.append(rating)
-    avg = sum(ratings) / len(ratings)
-    await dishes_collection.update_one(
-        {"_id": ObjectId(dish_id)},
-        {"$set": {"ratings": ratings, "average_rating": avg}}
+    
+    # ✅ CONCURRENCY SAFE: Use atomic operations
+    # Add rating using $push and recalculate average using aggregation
+    result = await dishes_collection.update_one(
+        {"_id": dish_oid},
+        {"$push": {"ratings": rating}}
     )
-    return {"msg": "Rating added", "average_rating": avg}
+    
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Dish not found")
+    
+    # ✅ Calculate new average using aggregation (atomic)
+    pipeline = [
+        {"$match": {"_id": dish_oid}},
+        {"$project": {
+            "average_rating": {"$avg": "$ratings"},
+            "rating_count": {"$size": "$ratings"}
+        }}
+    ]
+    
+    aggregation_result = await dishes_collection.aggregate(pipeline).to_list(1)
+    if aggregation_result:
+        new_average = aggregation_result[0]["average_rating"]
+        rating_count = aggregation_result[0]["rating_count"]
+        
+        # Update the average_rating field
+        await dishes_collection.update_one(
+            {"_id": dish_oid},
+            {"$set": {"average_rating": new_average}}
+        )
+        
+        return {
+            "msg": "Rating added successfully", 
+            "average_rating": new_average,
+            "total_ratings": rating_count
+        }
+    else:
+        raise HTTPException(status_code=404, detail="Dish not found")
 
 @router.post("/{dish_id}/toggle-favorite")
 async def toggle_favorite_dish(dish_id: str, decoded=Depends(get_current_user)):
-    user_email = decoded.get("email")
-    user = await users_collection.find_one({"email": user_email})
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    favorite_ids = user.get("favorite_dishes") or []
-    dish_id_str = str(dish_id)
-    if dish_id_str in favorite_ids:
-        await users_collection.update_one(
-            {"_id": user["_id"]},
-            {"$pull": {"favorite_dishes": dish_id_str}}
-        )
-        return {"isFavorite": False}
-    else:
-        await users_collection.update_one(
-            {"_id": user["_id"]},
-            {"$addToSet": {"favorite_dishes": dish_id_str}}
-        )
-        return {"isFavorite": True}
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # ✅ Validate ObjectId before using
+        dish_oid = _validate_object_id(dish_id, "dish_id")
+        
+        # ✅ Check if dish exists first
+        dish_exists = await dishes_collection.find_one({"_id": dish_oid}, {"_id": 1})
+        if not dish_exists:
+            raise HTTPException(status_code=404, detail="Dish not found")
+        
+        # ✅ Use consistent method for getting user email and user data
+        user_email = extract_user_email(decoded)
+        logger.info(f"🔍 Toggle favorite - User email: {user_email}")
+        
+        # ✅ Use get_user_by_email for consistency with other endpoints
+        user = await get_user_by_email(user_email, decoded)  # ✅ Pass decoded token
+        logger.info(f"✅ User found: {user.get('_id')} - {user.get('email')}")
+        
+        favorite_ids = user.get("favorite_dishes") or []
+        dish_id_str = str(dish_oid)
+        
+        logger.info(f"📋 Current favorites: {len(favorite_ids)} dishes")
+        logger.info(f"❤️ Toggling dish: {dish_id_str}")
+        
+        if dish_id_str in favorite_ids:
+            # Remove from favorites
+            await users_collection.update_one(
+                {"_id": user["_id"]},
+                {"$pull": {"favorite_dishes": dish_id_str}}
+            )
+            logger.info(f"➖ Removed dish {dish_id_str} from favorites")
+            return {"isFavorite": False, "message": "Removed from favorites"}
+        else:
+            # Add to favorites
+            await users_collection.update_one(
+                {"_id": user["_id"]},
+                {"$addToSet": {"favorite_dishes": dish_id_str}}
+            )
+            logger.info(f"➕ Added dish {dish_id_str} to favorites")
+            return {"isFavorite": True, "message": "Added to favorites"}
+            
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
+    except Exception as e:
+        logger.error(f"❌ Error in toggle_favorite_dish: {str(e)}")
+        logger.error(f"📧 User email: {decoded.get('email', 'N/A')}")
+        logger.error(f"🆔 User UID: {decoded.get('uid', 'N/A')}")
+        raise HTTPException(status_code=500, detail=f"Failed to toggle favorite: {str(e)}")
+
+def _check_admin_access(decoded):
+    """
+    Check if user has admin access
+    For now, checking DEBUG environment or specific admin emails
+    """
+    import os
+    
+    # Allow in DEBUG mode
+    if os.getenv("DEBUG", "False").lower() == "true":
+        return True
+    
+    # Check for admin emails (add your admin emails here)
+    user_email = extract_user_email(decoded)
+    admin_emails = os.getenv("ADMIN_EMAILS", "").split(",")
+    admin_emails = [email.strip() for email in admin_emails if email.strip()]
+    
+    if user_email in admin_emails:
+        return True
+    
+    # You can add role-based check here if you have user roles in database
+    # user = await users_collection.find_one({"email": user_email})
+    # if user and user.get("role") == "admin":
+    #     return True
+    
+    return False
 
 # Admin routes
 @router.post("/admin/cleanup")
 async def cleanup_dishes(decoded=Depends(get_current_user)):
+    # ✅ Check admin access
+    if not _check_admin_access(decoded):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
     res = await dishes_collection.delete_many({
         "$or": [
             {"name": {"$exists": False}},
@@ -362,6 +522,10 @@ async def cleanup_dishes(decoded=Depends(get_current_user)):
 
 @router.post("/admin/migrate-difficulty")
 async def migrate_difficulty_to_dishes(decoded=Depends(get_current_user)):
+    # ✅ Check admin access
+    if not _check_admin_access(decoded):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
     migrated_count = 0
     
     dishes_cursor = dishes_collection.find({
@@ -373,14 +537,18 @@ async def migrate_difficulty_to_dishes(decoded=Depends(get_current_user)):
         try:
             recipe_id = dish.get("recipe_id")
             if recipe_id:
-                recipe = await recipe_collection.find_one({"_id": ObjectId(recipe_id)})
-                if recipe and recipe.get("difficulty"):
-                    await dishes_collection.update_one(
-                        {"_id": dish["_id"]},
-                        {"$set": {"difficulty": recipe["difficulty"]}}
-                    )
-                    migrated_count += 1
-                    logging.info(f"Migrated difficulty '{recipe['difficulty']}' for dish: {dish.get('name')}")
+                # ✅ Validate ObjectId before using
+                if ObjectId.is_valid(recipe_id):
+                    recipe = await recipe_collection.find_one({"_id": ObjectId(recipe_id)})
+                    if recipe and recipe.get("difficulty"):
+                        await dishes_collection.update_one(
+                            {"_id": dish["_id"]},
+                            {"$set": {"difficulty": recipe["difficulty"]}}
+                        )
+                        migrated_count += 1
+                        logging.info(f"Migrated difficulty '{recipe['difficulty']}' for dish: {dish.get('name')}")
+                else:
+                    logging.warning(f"Invalid recipe_id format: {recipe_id} for dish: {dish.get('name')}")
         except Exception as e:
             logging.error(f"Failed to migrate dish {dish.get('_id')}: {str(e)}")
     
@@ -391,6 +559,10 @@ async def migrate_difficulty_to_dishes(decoded=Depends(get_current_user)):
 
 @router.post("/admin/migrate-images")
 async def migrate_existing_images(decoded=Depends(get_current_user)):
+    # ✅ Check admin access
+    if not _check_admin_access(decoded):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
     migrated_dishes = 0
     migrated_recipes = 0
     
@@ -398,7 +570,7 @@ async def migrate_existing_images(decoded=Depends(get_current_user)):
     async for dish in dishes_cursor:
         try:
             if dish.get("image_b64") and dish.get("image_mime"):
-                image_url = await upload_image_to_cloudinary(
+                upload_result = await upload_image_to_cloudinary(
                     dish["image_b64"], 
                     dish["image_mime"], 
                     folder="dishes_migration"
@@ -407,7 +579,7 @@ async def migrate_existing_images(decoded=Depends(get_current_user)):
                 await dishes_collection.update_one(
                     {"_id": dish["_id"]},
                     {
-                        "$set": {"image_url": image_url},
+                        "$set": {"image_url": upload_result["secure_url"]},
                         "$unset": {"image_b64": "", "image_mime": ""}
                     }
                 )
@@ -419,7 +591,7 @@ async def migrate_existing_images(decoded=Depends(get_current_user)):
     async for recipe in recipes_cursor:
         try:
             if recipe.get("image_b64") and recipe.get("image_mime"):
-                image_url = await upload_image_to_cloudinary(
+                upload_result = await upload_image_to_cloudinary(
                     recipe["image_b64"], 
                     recipe["image_mime"], 
                     folder="recipes_migration"
@@ -428,7 +600,7 @@ async def migrate_existing_images(decoded=Depends(get_current_user)):
                 await recipe_collection.update_one(
                     {"_id": recipe["_id"]},
                     {
-                        "$set": {"image_url": image_url},
+                        "$set": {"image_url": upload_result["secure_url"]},
                         "$unset": {"image_b64": "", "image_mime": ""}
                     }
                 )
@@ -493,7 +665,7 @@ async def get_my_dishes(
     """
     try:
         user_email = extract_user_email(decoded)
-        user = await get_user_by_email(user_email)
+        user = await get_user_by_email(user_email, decoded)  # ✅ Pass decoded token
         
         if not user:
             logging.error(f"User not found for email: {user_email}")
@@ -509,13 +681,16 @@ async def get_my_dishes(
             "name": {"$exists": True, "$ne": "", "$ne": None},  # Valid dish name
             "$or": [
                 {"creator_id": user_id},           # String version of user ID
-                {"creator_id": ObjectId(user_id)}, # ObjectId version (if stored as ObjectId)
                 {"created_by": user_email_from_doc},  # User email
                 {"created_by": user_id},           # User ID in created_by field
                 {"user_id": user_id},              # Alternative user_id field
                 {"owner_id": user_id},             # Alternative owner_id field
             ]
         }
+        
+        # ✅ Safe ObjectId conversion - only if valid
+        if ObjectId.is_valid(user_id):
+            query["$or"].append({"creator_id": ObjectId(user_id)})  # ObjectId version
         
         # Also include username if available
         if user_username:
@@ -601,7 +776,7 @@ async def get_dishes(
         if my_dishes:
             # Get current user info
             user_email = extract_user_email(decoded)
-            user = await get_user_by_email(user_email)
+            user = await get_user_by_email(user_email, decoded)  # ✅ Pass decoded token
             
             if not user:
                 logging.warning(f"User not found for my_dishes query: {user_email}")
@@ -613,13 +788,16 @@ async def get_dishes(
             user_filter = {
                 "$or": [
                     {"creator_id": user_id},
-                    {"creator_id": ObjectId(user_id)},
                     {"created_by": user_email_from_doc},
                     {"created_by": user_id},
                     {"user_id": user_id},
                     {"owner_id": user_id}
                 ]
             }
+            
+            # ✅ Safe ObjectId conversion - only if valid
+            if ObjectId.is_valid(user_id):
+                user_filter["$or"].append({"creator_id": ObjectId(user_id)})
             
             if user_username:
                 user_filter["$or"].append({"created_by": user_username})
@@ -648,13 +826,18 @@ async def get_dishes(
 @router.get("/{dish_id}", response_model=DishDetailOut)
 async def get_dish_detail(dish_id: str):
     """
-    Get single dish details by ID
+    Get single dish details by ID - SECURE VERSION
     """
     try:
-        d = await dishes_collection.find_one({"_id": ObjectId(dish_id)})
+        # ✅ Validate ObjectId before using
+        dish_oid = _validate_object_id(dish_id, "dish_id")
+        
+        d = await dishes_collection.find_one({"_id": dish_oid})
         if not d:
             raise HTTPException(status_code=404, detail="Dish not found")
         return _to_detail_out(d)
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
     except Exception as e:
         logging.error(f"Error getting dish {dish_id}: {str(e)}")
         raise HTTPException(status_code=404, detail="Dish not found")
@@ -662,10 +845,13 @@ async def get_dish_detail(dish_id: str):
 @router.get("/{dish_id}/with-recipe", response_model=DishWithRecipeDetailOut)
 async def get_dish_with_recipe(dish_id: str):
     """
-    Get dish with associated recipe details
+    Get dish with associated recipe details - SECURE VERSION
     """
     try:
-        dish = await dishes_collection.find_one({"_id": ObjectId(dish_id)})
+        # ✅ Validate ObjectId before using
+        dish_oid = _validate_object_id(dish_id, "dish_id")
+        
+        dish = await dishes_collection.find_one({"_id": dish_oid})
         if not dish:
             raise HTTPException(status_code=404, detail="Dish not found")
         
@@ -673,22 +859,26 @@ async def get_dish_with_recipe(dish_id: str):
         recipe_id = dish.get("recipe_id")
         if recipe_id:
             try:
-                r = await recipe_collection.find_one({"_id": ObjectId(recipe_id)})
-                if r:
-                    recipe = RecipeDetailOut(
-                        id=str(r["_id"]),
-                        name=r.get("name", ""),
-                        description=r.get("description", ""),
-                        ingredients=r.get("ingredients", []),
-                        difficulty=r.get("difficulty", ""),
-                        instructions=r.get("instructions", []),
-                        average_rating=float(r.get("average_rating", 0.0)),
-                        image_url=r.get("image_url"),
-                        created_by=r.get("created_by"),
-                        dish_id=r.get("dish_id"),
-                        ratings=r.get("ratings", []),
-                        created_at=r.get("created_at"),
-                    )
+                # ✅ Validate recipe ObjectId before using
+                if ObjectId.is_valid(recipe_id):
+                    r = await recipe_collection.find_one({"_id": ObjectId(recipe_id)})
+                    if r:
+                        recipe = RecipeDetailOut(
+                            id=str(r["_id"]),
+                            name=r.get("name", ""),
+                            description=r.get("description", ""),
+                            ingredients=r.get("ingredients", []),
+                            difficulty=r.get("difficulty", ""),
+                            instructions=r.get("instructions", []),
+                            average_rating=float(r.get("average_rating", 0.0)),
+                            image_url=r.get("image_url"),
+                            created_by=r.get("created_by"),
+                            dish_id=r.get("dish_id"),
+                            ratings=r.get("ratings", []),
+                            created_at=r.get("created_at"),
+                        )
+                else:
+                    logging.warning(f"Invalid recipe_id format: {recipe_id} for dish: {dish_id}")
             except Exception as recipe_e:
                 logging.warning(f"Failed to fetch recipe {recipe_id}: {str(recipe_e)}")
                 # Continue without recipe if recipe fetch fails

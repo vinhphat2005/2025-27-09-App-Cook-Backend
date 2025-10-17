@@ -3,7 +3,7 @@ Recipe Management Routes - Simplified Main Router
 All handlers moved to utils.recipe_handlers for better organization
 """
 from fastapi import APIRouter, Depends, Body
-from models.recipe_model import RecipeIn, RecipeOut
+from models.recipe_model import RecipeIn, RecipeOut, RatingRequest
 from core.auth.dependencies import get_current_user
 from utils.recipe_handlers import (
     create_recipe_handler,
@@ -34,5 +34,8 @@ async def get_recipe(recipe_id: str):
     return await get_recipe_handler(recipe_id)
 
 @router.post("/{recipe_id}/rate")
-async def rate_recipe(recipe_id: str, rating: int, decoded=Depends(get_current_user)):
-    return await rate_recipe_handler(recipe_id, rating, decoded)
+async def rate_recipe(recipe_id: str, rating_request: RatingRequest, decoded=Depends(get_current_user)):
+    """
+    Rate a recipe (1-5 stars) - Uses request body for better security
+    """
+    return await rate_recipe_handler(recipe_id, rating_request.rating, decoded)

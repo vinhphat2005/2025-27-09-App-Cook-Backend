@@ -5,13 +5,15 @@ from datetime import datetime, timezone
 from bson import ObjectId
 from pydantic import BaseModel, Field
 from core.auth.dependencies import get_current_user
-from main_async import db
+from database.mongo import comments_collection, dishes_collection  # ✅ Consistent import
 from starlette.responses import Response
 from fastapi import Request
+
 router = APIRouter(prefix="/comments", tags=["Comments"])
 
-comments_col = db["comments"]
-dishes_col = db["dishes"]
+# ✅ Use consistent collection naming
+comments_col = comments_collection
+dishes_col = dishes_collection
 
 # ================== Models ==================
 class CommentPermissionOut(BaseModel):
@@ -50,12 +52,24 @@ class CommentOut(BaseModel):
 # ================== Helpers ==================
 
 def oid(s: str) -> ObjectId:
+    """
+    ✅ Enhanced ObjectId validation with better error handling
+    """
+    if not s or not isinstance(s, str):
+        raise HTTPException(status_code=400, detail="Invalid ID: empty or not string")
+    
+    if not ObjectId.is_valid(s):
+        raise HTTPException(status_code=400, detail="Invalid ID format")
+    
     try:
         return ObjectId(s)
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid ObjectId")
+        raise HTTPException(status_code=400, detail="Invalid ID format")
 
 def to_out(doc: Dict[str, Any], current_user_id: Optional[str] = None) -> CommentOut:
+    """
+    ✅ Convert MongoDB document to CommentOut with proper user context
+    """
     d = {**doc, "id": str(doc["_id"])}
     d.pop("_id", None)
 
@@ -63,14 +77,16 @@ def to_out(doc: Dict[str, Any], current_user_id: Optional[str] = None) -> Commen
     is_liked = bool(current_user_id and current_user_id in liked_by)
 
     d["isLiked"] = is_liked
-    print(f"current_user_id: '{current_user_id}', doc_user_id: '{doc.get('user_id')}', equal: {current_user_id == doc.get('user_id')}")
     d["can_edit"] = bool(current_user_id and doc.get("user_id") == current_user_id)
 
     return CommentOut(**d)
 
-
+def get_comment_permissions(c: Dict[str, Any], user_id: str) -> CommentPermissionOut:
+    """
+    ✅ Get comment permissions for a user
+    """
     owned = (c.get("user_id") == user_id)
-    # Nếu sau này có role admin/moderator thì có thể mở rộng ở đây
+    # Future: Add role-based permissions here (admin, moderator)
     can_edit = owned
     can_delete = owned
 
@@ -100,55 +116,79 @@ async def head_comment_permissions(comment_id: str, decoded=Depends(get_current_
 
     # Có quyền
     return Response(status_code=204)
-# dependency: cho phép không có token
+# ✅ Secure optional user dependency
 async def current_user_optional(request: Request):
+    """
+    Get current user if authenticated, return None if not
+    Enhanced with proper error handling
+    """
     try:
         user = await get_current_user(request)
-        print(f"=== current_user_optional SUCCESS: {user} ===")
         return user
+    except HTTPException:
+        # Expected authentication errors
+        return None
     except Exception as e:
-        print(f"=== current_user_optional FAILED: {e} ===")
+        # Unexpected errors - log for debugging but don't crash
+        import logging
+        logging.warning(f"Unexpected error in current_user_optional: {e}")
         return None
 async def ensure_indexes():
-    await comments_col.create_index([("dish_id", 1), ("created_at", -1)])
-    await comments_col.create_index([("parent_comment_id", 1), ("created_at", 1)])
-    await comments_col.create_index([("user_id", 1), ("created_at", -1)])
-    # Index để kiểm tra duplicate rating
-    await comments_col.create_index([("dish_id", 1), ("user_id", 1), ("parent_comment_id", 1)])
+    """
+    ✅ Create database indexes for optimal query performance
+    """
+    try:
+        await comments_col.create_index([("dish_id", 1), ("created_at", -1)])
+        await comments_col.create_index([("parent_comment_id", 1), ("created_at", 1)])
+        await comments_col.create_index([("user_id", 1), ("created_at", -1)])
+        # Index để kiểm tra duplicate rating
+        await comments_col.create_index([("dish_id", 1), ("user_id", 1), ("parent_comment_id", 1)])
+        import logging
+        logging.info("Comment indexes created successfully")
+    except Exception as e:
+        import logging
+        logging.error(f"Failed to create comment indexes: {e}")
+        # Don't fail startup for index creation issues
 
 async def recalc_dish_rating(dish_id: str):
     """
+    ✅ Recalculate dish rating with enhanced error handling
     Chỉ tính trung bình từ comment gốc (parent_comment_id rỗng/None và rating > 0).
     """
-    pipeline = [
-        {"$match": {
-            "dish_id": dish_id,
-            "$or": [{"parent_comment_id": None}, {"parent_comment_id": ""}],
-            "rating": {"$gt": 0}
-        }},
-        {"$group": {"_id": "$dish_id", "count": {"$sum": 1}, "avg": {"$avg": "$rating"}}},
-    ]
-    agg = comments_col.aggregate(pipeline)
-    stats = await agg.to_list(length=1)
-    if stats:
-        s = stats[0]
-        await dishes_col.update_one(
-            {"_id": ObjectId(dish_id)},
-            {"$set": {"average_rating": float(s["avg"]), "comments_count": int(s["count"])}},
-            upsert=False,
-        )
-    else:
-        await dishes_col.update_one(
-            {"_id": ObjectId(dish_id)},
-            {"$set": {"average_rating": 0.0, "comments_count": 0}},
-            upsert=False,
-        )
+    try:
+        # Validate dish_id first
+        dish_oid = oid(dish_id)
+        
+        pipeline = [
+            {"$match": {
+                "dish_id": dish_id,
+                "$or": [{"parent_comment_id": None}, {"parent_comment_id": ""}],
+                "rating": {"$gt": 0}
+            }},
+            {"$group": {"_id": "$dish_id", "count": {"$sum": 1}, "avg": {"$avg": "$rating"}}},
+        ]
+        agg = comments_col.aggregate(pipeline)
+        stats = await agg.to_list(length=1)
+        
+        if stats:
+            s = stats[0]
+            await dishes_col.update_one(
+                {"_id": dish_oid},
+                {"$set": {"average_rating": float(s["avg"]), "comments_count": int(s["count"])}},
+                upsert=False,
+            )
+        else:
+            await dishes_col.update_one(
+                {"_id": dish_oid},
+                {"$set": {"average_rating": 0.0, "comments_count": 0}},
+                upsert=False,
+            )
+    except Exception as e:
+        import logging
+        logging.error(f"Failed to recalculate dish rating for {dish_id}: {e}")
+        # Don't fail the main operation if rating calculation fails
 
 # ================== Routes ==================
-
-@router.on_event("startup")
-async def _on_startup():
-    await ensure_indexes()
 
 @router.post("/", response_model=CommentOut)
 async def create_comment(payload: CommentIn, decoded=Depends(get_current_user)):
@@ -157,22 +197,16 @@ async def create_comment(payload: CommentIn, decoded=Depends(get_current_user)):
     user_display_id = decoded.get("email", "").split("@")[0] if decoded.get("email") else None
     user_avatar = decoded.get("picture")
 
-    # Kiểm tra dish tồn tại
-    try:
-        dish_oid = ObjectId(payload.dish_id)
-    except Exception:
-        raise HTTPException(400, "Invalid dish_id")
+    # ✅ Validate dish_id ObjectId
+    dish_oid = oid(payload.dish_id)
     dish_exists = await dishes_col.find_one({"_id": dish_oid}, {"_id": 1})
     if not dish_exists:
         raise HTTPException(404, detail="Dish not found")
 
-    # Kiểm tra parent comment nếu có
+    # ✅ Validate parent comment if provided
     if payload.parent_comment_id:
-        try:
-            _ = ObjectId(payload.parent_comment_id)
-        except Exception:
-            raise HTTPException(400, "Invalid parent_comment_id")
-        parent = await comments_col.find_one({"_id": ObjectId(payload.parent_comment_id)}, {"_id": 1, "dish_id": 1})
+        parent_oid = oid(payload.parent_comment_id)
+        parent = await comments_col.find_one({"_id": parent_oid}, {"_id": 1, "dish_id": 1})
         if not parent:
             raise HTTPException(404, "Parent comment not found")
         if parent["dish_id"] != payload.dish_id:
@@ -248,19 +282,12 @@ async def list_comments_by_dish(
         # Convert main comment
         comment_out = to_out(c, user_id)
         
-        # Load replies if it's a main comment
+        # ✅ Load replies if it's a main comment
         if not c.get("parent_comment_id"):
-            reply_cursor = comments_col.find({
-                "parent_comment_id": str(c["_id"])  # ← Đây là chỗ ĐÚNG
-            }).sort("created_at", 1)
-            # Thử cả ObjectId và string để đảm bảo
             comment_id_str = str(c["_id"])
             reply_cursor = comments_col.find({
-                "$or": [
-                    {"parent_comment_id": comment_id_str},
-            {"parent_comment_id": c["_id"]}
-        ]
-    }).sort("created_at", 1)
+                "parent_comment_id": comment_id_str
+            }).sort("created_at", 1)
             
             replies = []
             async for reply in reply_cursor:
@@ -306,21 +333,23 @@ async def check_user_rating(dish_id: str, decoded=Depends(current_user_optional)
 
 @router.post("/{comment_id}/like")
 async def toggle_like_comment(comment_id: str, decoded=Depends(get_current_user)):
+    """
+    ✅ Atomic toggle like operation to prevent race conditions
+    """
     user_id = decoded["uid"]
-    try:
-        c_oid = ObjectId(comment_id)
-    except Exception:
-        raise HTTPException(400, "Invalid comment_id")
+    c_oid = oid(comment_id)
 
+    # ✅ Check comment exists first
     c = await comments_col.find_one({"_id": c_oid}, {"_id": 1, "liked_by": 1})
     if not c:
         raise HTTPException(404, "Comment not found")
 
     liked_by: List[str] = c.get("liked_by", [])
+    
     if user_id in liked_by:
-        # Đã like -> un-like
-        await comments_col.update_one(
-            {"_id": c_oid},
+        # ✅ ATOMIC: Un-like operation
+        result = await comments_col.update_one(
+            {"_id": c_oid, "liked_by": user_id},  # Only update if user is in liked_by
             {
                 "$pull": {"liked_by": user_id}, 
                 "$inc": {"likes": -1},
@@ -328,10 +357,13 @@ async def toggle_like_comment(comment_id: str, decoded=Depends(get_current_user)
             }
         )
         liked = False
+        if result.modified_count == 0:
+            # Race condition: user already unliked
+            liked = False
     else:
-        # Chưa like -> like
-        await comments_col.update_one(
-            {"_id": c_oid},
+        # ✅ ATOMIC: Like operation
+        result = await comments_col.update_one(
+            {"_id": c_oid, "liked_by": {"$ne": user_id}},  # Only update if user not in liked_by
             {
                 "$addToSet": {"liked_by": user_id}, 
                 "$inc": {"likes": 1},
@@ -339,12 +371,16 @@ async def toggle_like_comment(comment_id: str, decoded=Depends(get_current_user)
             }
         )
         liked = True
+        if result.modified_count == 0:
+            # Race condition: user already liked
+            liked = True
 
-    # Get updated likes count
-    c2 = await comments_col.find_one({"_id": c_oid}, {"likes": 1})
-    likes_count = c2.get("likes", 0)
+    # ✅ Get final state atomically
+    c_final = await comments_col.find_one({"_id": c_oid}, {"likes": 1, "liked_by": 1})
+    likes_count = c_final.get("likes", 0)
+    actual_liked = user_id in c_final.get("liked_by", [])
 
-    return {"ok": True, "liked": liked, "likes_count": likes_count}
+    return {"ok": True, "liked": actual_liked, "likes_count": likes_count}
 
 @router.patch("/{comment_id}", response_model=CommentOut)
 async def update_comment(comment_id: str, payload: CommentUpdate, decoded=Depends(get_current_user)):

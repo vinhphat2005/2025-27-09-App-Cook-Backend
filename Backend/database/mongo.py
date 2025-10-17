@@ -21,6 +21,7 @@ ingredients_collection = db["ingredients"]
 recipe_collection = db["recipes"]
 users_collection = db["users"]
 dishes_collection = db["dishes"]
+comments_collection = db["comments"]  # Added for comments
 
 # User-related collections (ALL ASYNC)
 user_social_collection = db["user_social"]  # followers, following

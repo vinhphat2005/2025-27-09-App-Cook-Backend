@@ -1,7 +1,21 @@
+# Environment & Credentials
 .env
 serviceAccountKey.json
-# Bỏ file biên dịch Python
+
+# Python compiled files
 __pycache__/
 *.pyc
 *.pyo
-*.pyd   
+*.pyd
+
+# Testing scripts (chứa credentials, chỉ dùng local)
+get_test_token.py
+scripts/get_test_token.py
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,16 +1,7 @@
-#comment_model.py
+# comment_model.py
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
-from datetime import datetime, timezone
-from bson import ObjectId
-from fastapi import APIRouter, Depends, HTTPException, Query
-from core.auth.dependencies import get_current_user
-from main_async import db
-
-router = APIRouter(prefix="/comments", tags=["Comments"])
-
-comments_col = db["comments"]
-dishes_col = db["dishes"]
+from typing import Optional
+from datetime import datetime
 
 class CommentIn(BaseModel):
     dish_id: str
@@ -34,5 +25,12 @@ class CommentOut(BaseModel):
     rating: int
     content: str
     likes: int = 0
+    liked_by: Optional[list] = []  # New: track who liked for atomic operations
     created_at: datetime
     updated_at: Optional[datetime] = None
+
+class CommentPermissionOut(BaseModel):
+    """Model for comment permissions response"""
+    owned: bool
+    can_edit: bool
+    can_delete: bool

@@ -15,6 +15,7 @@ from bson import ObjectId
 from typing import Optional, Dict, Any
 import firebase_admin
 from firebase_admin import auth as fb_auth
+from core.auth.dependencies import get_user_by_email  # ✅ Import from dependencies
 
 
 # ==================== AUTH HELPERS ====================
@@ -47,16 +48,6 @@ def get_current_user(request: Request) -> Dict[str, Any]:
     """
     import asyncio
     return asyncio.run(get_current_user_async(request))
-
-
-async def get_user_by_email(user_email: str):
-    """
-    Helper function to get user from database by email
-    """
-    user = await users_collection.find_one({"email": user_email})
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
 
 
 def extract_user_email(decoded: Dict[str, Any]) -> str:
@@ -97,43 +88,43 @@ class UserDataService:
     """Service để quản lý các collections liên quan đến user"""
     
     @staticmethod
-    async def get_user_social(user_id: str) -> Optional[UserSocial]:
-        """Lấy thông tin social của user"""
+    async def get_user_social(user_id: ObjectId) -> Optional[UserSocial]:
+        """Lấy thông tin social của user - ✅ Uses ObjectId"""
         social_data = await user_social_collection.find_one({"user_id": user_id})
         if social_data:
             return UserSocial(**social_data)
         return None
     
     @staticmethod
-    async def get_user_activity(user_id: str) -> Optional[UserActivity]:
-        """Lấy activity history của user"""
+    async def get_user_activity(user_id: ObjectId) -> Optional[UserActivity]:
+        """Lấy activity history của user - ✅ Uses ObjectId"""
         activity_data = await user_activity_collection.find_one({"user_id": user_id})
         if activity_data:
             return UserActivity(**activity_data)
         return None
     
     @staticmethod
-    async def get_user_notifications(user_id: str) -> Optional[UserNotifications]:
-        """Lấy notifications của user"""
+    async def get_user_notifications(user_id: ObjectId) -> Optional[UserNotifications]:
+        """Lấy notifications của user - ✅ Uses ObjectId"""
         notif_data = await user_notifications_collection.find_one({"user_id": user_id})
         if notif_data:
             return UserNotifications(**notif_data)
         return None
     
     @staticmethod
-    async def get_user_preferences(user_id: str) -> Optional[UserPreferences]:
-        """Lấy preferences của user"""
+    async def get_user_preferences(user_id: ObjectId) -> Optional[UserPreferences]:
+        """Lấy preferences của user - ✅ Uses ObjectId"""
         pref_data = await user_preferences_collection.find_one({"user_id": user_id})
         if pref_data:
             return UserPreferences(**pref_data)
         return None
     
     @staticmethod
-    async def init_user_data(user_id: str):
-        """Khởi tạo data cho user mới"""
+    async def init_user_data(user_id: ObjectId):
+        """Khởi tạo data cho user mới - ✅ Uses ObjectId"""
         # Tạo social data
         await user_social_collection.insert_one({
-            "user_id": user_id,
+            "user_id": user_id,  # ✅ ObjectId
             "followers": [],
             "following": [],
             "follower_count": 0,
@@ -142,7 +133,7 @@ class UserDataService:
         
         # Tạo activity data
         await user_activity_collection.insert_one({
-            "user_id": user_id,
+            "user_id": user_id,  # ✅ ObjectId
             "favorite_dishes": [],
             "cooked_dishes": [],
             "viewed_dishes": [],
@@ -152,14 +143,14 @@ class UserDataService:
         
         # Tạo notifications data
         await user_notifications_collection.insert_one({
-            "user_id": user_id,
+            "user_id": user_id,  # ✅ ObjectId
             "notifications": [],
             "unread_count": 0
         })
         
         # Tạo preferences data
         await user_preferences_collection.insert_one({
-            "user_id": user_id,
+            "user_id": user_id,  # ✅ ObjectId
             "reminders": [],
             "dietary_restrictions": [],
             "cuisine_preferences": [],
@@ -167,8 +158,8 @@ class UserDataService:
         })
     
     @staticmethod
-    async def add_to_cooked(user_id: str, dish_id: str, max_history: int = 50):
-        """Thêm món ăn vào lịch sử đã nấu"""
+    async def add_to_cooked(user_id: ObjectId, dish_id: str, max_history: int = 50):
+        """Thêm món ăn vào lịch sử đã nấu - ✅ Uses ObjectId"""
         activity = await user_activity_collection.find_one({"user_id": user_id})
         
         if not activity:
@@ -193,8 +184,8 @@ class UserDataService:
         return {"msg": "Dish added to cooked history"}
     
     @staticmethod
-    async def add_to_viewed(user_id: str, dish_id: str, max_history: int = 50):
-        """Thêm món ăn vào lịch sử đã xem"""
+    async def add_to_viewed(user_id: ObjectId, dish_id: str, max_history: int = 50):
+        """Thêm món ăn vào lịch sử đã xem - ✅ Uses ObjectId"""
         activity = await user_activity_collection.find_one({"user_id": user_id})
         
         if not activity:
@@ -219,8 +210,8 @@ class UserDataService:
         return {"msg": "Dish added to viewed history"}
     
     @staticmethod
-    async def add_to_favorites(user_id: str, dish_id: str):
-        """Thêm món ăn vào danh sách yêu thích"""
+    async def add_to_favorites(user_id: ObjectId, dish_id: str):
+        """Thêm món ăn vào danh sách yêu thích - ✅ Uses ObjectId"""
         await user_activity_collection.update_one(
             {"user_id": user_id},
             {"$addToSet": {"favorite_dishes": dish_id}}
@@ -228,29 +219,36 @@ class UserDataService:
         return {"msg": "Dish added to favorites"}
     
     @staticmethod
-    async def follow_user(follower_id: str, following_id: str):
-        """User follow user khác"""
+    async def follow_user(follower_id: ObjectId, following_id: str):
+        """User follow user khác - ✅ Uses ObjectId consistently"""
+        # Convert following_id string to ObjectId
+        try:
+            following_oid = ObjectId(following_id)
+        except:
+            raise HTTPException(400, "Invalid following_id format")
+        
+        # ✅ Store ObjectIds in followers/following arrays for consistency
         # Thêm vào following list của follower
         await user_social_collection.update_one(
             {"user_id": follower_id},
-            {"$addToSet": {"following": following_id}}
+            {"$addToSet": {"following": following_oid}}  # ✅ Store ObjectId
         )
         
         # Thêm vào followers list của người được follow
         await user_social_collection.update_one(
-            {"user_id": following_id},
-            {"$addToSet": {"followers": follower_id}}
+            {"user_id": following_oid},
+            {"$addToSet": {"followers": follower_id}}  # ✅ Store ObjectId
         )
         
         # Cập nhật counter
         await UserDataService._update_social_counters(follower_id)
-        await UserDataService._update_social_counters(following_id)
+        await UserDataService._update_social_counters(following_oid)
         
         return {"msg": "Successfully followed user"}
     
     @staticmethod
-    async def _update_social_counters(user_id: str):
-        """Cập nhật số lượng followers/following"""
+    async def _update_social_counters(user_id: ObjectId):
+        """Cập nhật số lượng followers/following - ✅ Uses ObjectId"""
         social = await user_social_collection.find_one({"user_id": user_id})
         if social:
             follower_count = len(social.get("followers", []))

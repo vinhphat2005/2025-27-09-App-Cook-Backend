@@ -25,11 +25,14 @@ from database.mongo import (
 async def create_user_handler(decoded):
     """
     Tạo user mới từ Firebase token (tự động được gọi khi login lần đầu)
+    Hỗ trợ Google OAuth - nhận name và picture từ token
     """
     email = decoded.get("email")
     uid = decoded.get("uid")
+    
+    # Google OAuth trả về các field này
     name = decoded.get("name", "")
-    avatar = decoded.get("picture", "")
+    avatar = decoded.get("picture", "")  # URL avatar từ Google
     
     if not email:
         raise HTTPException(status_code=400, detail="Email required from Firebase token")
@@ -37,36 +40,56 @@ async def create_user_handler(decoded):
     # Kiểm tra user đã tồn tại chưa
     existing_user = await users_collection.find_one({"email": email})
     if existing_user:
+        print(f"ℹ️  User already exists: {email}")
         return user_helper(existing_user)
 
     # Tạo display_id từ email
     display_id = email.split('@')[0]
-    
-    # Kiểm tra display_id trùng
-    counter = 1
     original_display_id = display_id
-    while await users_collection.find_one({"display_id": display_id}):
-        display_id = f"{original_display_id}{counter}"
-        counter += 1
-
-    # Tạo user mới
-    user_data = {
-        "email": email,
-        "display_id": display_id,
-        "name": name,
-        "avatar": avatar,
-        "bio": "",
-        "firebase_uid": uid,
-        "createdAt": datetime.now(timezone.utc),
-        "lastLoginAt": datetime.now(timezone.utc),
-    }
-
-    result = await users_collection.insert_one(user_data)
-    new_user = await users_collection.find_one({"_id": result.inserted_id})
     
-    # Khởi tạo các collections phụ cho user
-    await UserDataService.init_user_data(str(new_user["_id"]))
+    # ✅ Try to create user với display_id, handle DuplicateKeyError nếu conflict
+    from pymongo.errors import DuplicateKeyError
+    
+    counter = 1
+    max_attempts = 100  # Tránh infinite loop
+    
+    while counter <= max_attempts:
+        try:
+            # Tạo user mới
+            user_data = {
+                "email": email,
+                "display_id": display_id,
+                "name": name,
+                "avatar": avatar,
+                "bio": "",
+                "firebase_uid": uid,
+                "createdAt": datetime.now(timezone.utc),
+                "lastLoginAt": datetime.now(timezone.utc),
+            }
 
+            result = await users_collection.insert_one(user_data)
+            new_user = await users_collection.find_one({"_id": result.inserted_id})
+            
+            # ✅ Success - break out of loop
+            break
+            
+        except DuplicateKeyError as e:
+            # ✅ display_id conflict - try next number
+            if "display_id" in str(e):
+                display_id = f"{original_display_id}{counter}"
+                counter += 1
+                continue
+            else:
+                # Other duplicate key error (email, etc.)
+                raise e
+    else:
+        # Reached max_attempts
+        raise HTTPException(500, f"Could not generate unique display_id after {max_attempts} attempts")
+    
+    # Khởi tạo các collections phụ cho user - ✅ Pass ObjectId
+    await UserDataService.init_user_data(new_user["_id"])
+
+    print(f"✅ Created new user: {email} with display_id: {display_id}")
     return user_helper(new_user)
 
 
@@ -126,8 +149,8 @@ async def get_me_handler(decoded):
         result = await users_collection.insert_one(user_data)
         user = await users_collection.find_one({"_id": result.inserted_id})
         
-        # Khởi tạo các collections phụ cho user mới - async call
-        await UserDataService.init_user_data(str(user["_id"]))
+        # Khởi tạo các collections phụ cho user mới - ✅ Pass ObjectId
+        await UserDataService.init_user_data(user["_id"])
     else:
         # Cập nhật lastLoginAt cho user đã tồn tại - async call
         await users_collection.update_one(
@@ -190,7 +213,8 @@ async def get_my_social_handler(decoded):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    social_data = await UserDataService.get_user_social(str(user["_id"]))
+    # ✅ Pass ObjectId directly
+    social_data = await UserDataService.get_user_social(user["_id"])
     return social_data.dict() if social_data else {
         "followers": [], "following": [], "follower_count": 0, "following_count": 0
     }
@@ -213,10 +237,12 @@ async def follow_user_handler(user_id: str, decoded):
     if current_user["_id"] == user_to_follow["_id"]:
         raise HTTPException(status_code=400, detail="You cannot follow yourself")
     
-    result = await UserDataService.follow_user(str(current_user["_id"]), user_id)   
+    # ✅ Pass ObjectId directly  
+    result = await UserDataService.follow_user(current_user["_id"], user_id)   
  
     # Gửi thông báo milestone nếu cần
-    social_data = await UserDataService.get_user_social(user_id)
+    # ✅ Convert user_id string to ObjectId for query
+    social_data = await UserDataService.get_user_social(ObjectId(user_id))
     if social_data and social_data.follower_count % 5 == 0:
         # TODO: Implement milestone notification
         pass
@@ -245,7 +271,8 @@ async def get_my_activity_handler(decoded):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    activity_data = await UserDataService.get_user_activity(str(user["_id"]))
+    # ✅ Pass ObjectId directly
+    activity_data = await UserDataService.get_user_activity(user["_id"])
     return activity_data.dict() if activity_data else {
         "favorite_dishes": [], "cooked_dishes": [], "viewed_dishes": [], 
         "created_recipes": [], "created_dishes": []
@@ -261,19 +288,18 @@ async def add_cooked_dish_handler(dish_id: str, decoded):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    result = await UserDataService.add_to_cooked(str(user["_id"]), dish_id, MAX_HISTORY)
+    # ✅ Pass ObjectId directly
+    result = await UserDataService.add_to_cooked(user["_id"], dish_id, MAX_HISTORY)
     return result
 
 
 async def add_viewed_dish_handler(dish_id: str, decoded):
     """
-    Thêm món vào lịch sử đã xem
+    Thêm món vào lịch sử đã xem - ✅ Use user_activity_collection với viewed_dishes_and_users
     """
-
     if not ObjectId.is_valid(dish_id):
         raise HTTPException(status_code=400, detail="Invalid dish ID")
     
-
     dish = await dishes_collection.find_one({"_id": ObjectId(dish_id)})
     if not dish:
         raise HTTPException(status_code=404, detail="Dish not found")
@@ -283,29 +309,38 @@ async def add_viewed_dish_handler(dish_id: str, decoded):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
+    user_oid = user["_id"]  # ✅ ObjectId
+    now = datetime.now(timezone.utc)  # ✅ Timezone-aware
 
-    viewed_dish = {
-        "dish_id": dish_id,
-        "viewed_at": datetime.utcnow()
+    # ✅ Use same format as router: {type, id, name, image, ts}
+    viewed_entry = {
+        "type": "dish",
+        "id": dish_id,
+        "name": dish.get("name", ""),
+        "image": dish.get("image_b64", ""),
+        "ts": now,
     }
     
-    await users_collection.update_one(
-        {"_id": user["_id"]},
-        {
-            "$pull": {"viewed_dishes": {"dish_id": dish_id}},  # Xóa cũ nếu có
-        }
+    # ✅ Use user_activity_collection with viewed_dishes_and_users field
+    # 1) Xóa entry cũ nếu có (cùng type + id)
+    await user_activity_collection.update_one(
+        {"user_id": user_oid},
+        {"$pull": {"viewed_dishes_and_users": {"type": "dish", "id": dish_id}}},
+        upsert=True
     )
     
-    await users_collection.update_one(
-        {"_id": user["_id"]},
+    # 2) Thêm entry mới vào đầu list
+    await user_activity_collection.update_one(
+        {"user_id": user_oid},
         {
             "$push": {
-                "viewed_dishes": {
-                    "$each": [viewed_dish],
-                    "$position": 0,  # Thêm vào đầu list
+                "viewed_dishes_and_users": {
+                    "$each": [viewed_entry],
+                    "$position": 0,  # Thêm vào đầu
                     "$slice": 50     # Giữ tối đa 50 items
                 }
-            }
+            },
+            "$set": {"updated_at": now}
         },
         upsert=True
     )
@@ -315,7 +350,7 @@ async def add_viewed_dish_handler(dish_id: str, decoded):
 # Trong user_handlers.py (handler function)
 async def get_viewed_dishes_handler(limit: int, decoded):
     """
-    Lấy lịch sử món đã xem
+    Lấy lịch sử món đã xem - ✅ Use user_activity_collection với viewed_dishes_and_users
     """
     try:
         email = extract_user_email(decoded)
@@ -323,21 +358,32 @@ async def get_viewed_dishes_handler(limit: int, decoded):
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
-        viewed_dishes = user.get("viewed_dishes", [])[:limit]
+        user_oid = user["_id"]  # ✅ ObjectId
         
-        # Lấy thông tin chi tiết của các món đã xem
+        # ✅ Get from user_activity_collection với viewed_dishes_and_users field
+        activity_doc = await user_activity_collection.find_one(
+            {"user_id": user_oid},
+            {"_id": 0, "viewed_dishes_and_users": 1}
+        )
+        
+        viewed_items = (activity_doc or {}).get("viewed_dishes_and_users", [])[:limit]
+        
+        # ✅ Filter chỉ dishes (not users) và lấy thông tin chi tiết
         dish_details = []
-        for item in viewed_dishes:
-            dish = await dishes_collection.find_one({"_id": ObjectId(item["dish_id"])})
-            if dish:
-                dish_details.append({
-                    "id": str(dish["_id"]),
-                    "name": dish.get("name", ""),
-                    "image_b64": dish.get("image_b64"),
-                    "image_mime": dish.get("image_mime"),
-                    "cooking_time": dish.get("cooking_time", 0),
-                    "average_rating": dish.get("average_rating", 0.0),
-                    "viewed_at": item["viewed_at"]
+        for item in viewed_items:
+            if item.get("type") == "dish":
+                dish_id = item.get("id")
+                if dish_id and ObjectId.is_valid(dish_id):
+                    dish = await dishes_collection.find_one({"_id": ObjectId(dish_id)})
+                    if dish:
+                        dish_details.append({
+                            "id": str(dish["_id"]),
+                            "name": dish.get("name", ""),
+                            "image_b64": dish.get("image_b64"),
+                            "image_mime": dish.get("image_mime"),
+                            "cooking_time": dish.get("cooking_time", 0),
+                            "average_rating": dish.get("average_rating", 0.0),
+                            "viewed_at": item.get("ts")  # ✅ Use 'ts' field from new format
                 })
         
         return {
@@ -394,7 +440,8 @@ async def get_my_notifications_handler(decoded):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    notif_data = await UserDataService.get_user_notifications(str(user["_id"]))
+    # ✅ Pass ObjectId directly
+    notif_data = await UserDataService.get_user_notifications(user["_id"])
     return notif_data.dict() if notif_data else {"notifications": [], "unread_count": 0}
 
 
@@ -407,8 +454,9 @@ async def set_reminders_handler(reminders: List[str], decoded):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # ✅ Use ObjectId directly
     await user_preferences_collection.update_one(
-        {"user_id": str(user["_id"])},
+        {"user_id": user["_id"]},
         {"$set": {"reminders": reminders}},
         upsert=True
     )
@@ -424,7 +472,8 @@ async def get_reminders_handler(decoded):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    preferences = await user_preferences_collection.find_one({"user_id": str(user["_id"])})
+    # ✅ Use ObjectId directly
+    preferences = await user_preferences_collection.find_one({"user_id": user["_id"]})
     return preferences.get("reminders", []) if preferences else []
 
 async def get_my_favorites_handler(decoded):
