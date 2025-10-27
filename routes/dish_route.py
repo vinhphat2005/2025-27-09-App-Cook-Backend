@@ -2,6 +2,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from models.dish_model import Dish, DishOut, DishIn
 from models.dish_with_recipe_model import DishWithRecipeIn, DishWithRecipeOut
+from models.dish_response_models import DishDetailOut, DishWithRecipeDetailOut, RecipeDetailOut
 from database.mongo import dishes_collection, users_collection, recipe_collection
 from bson import ObjectId
 from datetime import datetime, timezone
@@ -61,23 +62,6 @@ class RecipeDetailOut(BaseModel):
     dish_id: str = None
     ratings: list = []
     created_at: datetime = None
-
-class DishWithRecipeDetailOut(BaseModel):
-    dish: 'DishDetailOut'
-    recipe: Optional[RecipeDetailOut] = None
-
-class DishDetailOut(BaseModel):
-    id: str
-    name: str
-    image_url: Optional[str] = None
-    cooking_time: int
-    average_rating: float
-    ingredients: List[str] = []
-    liked_by: List[str] = []
-    creator_id: Optional[str] = None
-    recipe_id: Optional[str] = None
-    difficulty: Optional[str] = None
-    created_at: Optional[datetime] = None
 
 class CheckFavoritesRequest(BaseModel):
     dish_ids: List[str]

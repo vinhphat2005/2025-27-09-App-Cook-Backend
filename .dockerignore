@@ -1,0 +1,10 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+*.env
+serviceAccountKey.json
+*.sqlite3
+.vscode
+.git

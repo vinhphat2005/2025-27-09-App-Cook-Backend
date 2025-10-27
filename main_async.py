@@ -255,7 +255,7 @@ async def log_requests(request: Request, call_next):
 
 # ==== Routes (ALL ASYNC) ====
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return {"ok": True, "async": True}
 
