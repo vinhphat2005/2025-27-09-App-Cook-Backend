@@ -898,11 +898,24 @@ async def permanent_delete_dish(dish_id: str, decoded=Depends(get_current_user))
         
         # ✅ 5. Delete image from Cloudinary
         cloudinary_deleted = False
-        if dish.get("image_url"):
+        if dish.get("image_url") and CLOUDINARY_ENABLED:
             try:
-                from utils.cloudinary_helper import delete_image_from_cloudinary
-                cloudinary_deleted = await delete_image_from_cloudinary(dish["image_url"])
-                logging.info(f"Deleted Cloudinary image for dish {dish_id}")
+                # Extract public_id from image_url
+                public_id = dish.get("image_public_id")
+                
+                if not public_id and dish.get("image_url"):
+                    image_url = dish.get("image_url", "")
+                    if "cloudinary.com" in image_url:
+                        parts = image_url.split("/")
+                        if len(parts) >= 2:
+                            filename = parts[-1].split(".")[0]
+                            folder = parts[-2] if len(parts) >= 3 else "dishes"
+                            public_id = f"{folder}/{filename}"
+                
+                if public_id:
+                    result = cloudinary.uploader.destroy(public_id)
+                    cloudinary_deleted = (result.get("result") == "ok")
+                    logging.info(f"Deleted Cloudinary image: {public_id}, result: {result}")
             except Exception as e:
                 logging.error(f"Error deleting Cloudinary image: {str(e)}")
         
