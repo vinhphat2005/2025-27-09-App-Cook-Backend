@@ -9,10 +9,12 @@ from fastapi.responses import JSONResponse
 
 import firebase_admin
 from firebase_admin import auth as fb_auth, credentials
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import motor.motor_asyncio
 import logging
 from bson import ObjectId
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 load_dotenv()
 
@@ -127,12 +129,116 @@ async def init_redis():
 # ==== FastAPI app ====
 app = FastAPI()
 
+# ==== Background Scheduler ====
+scheduler = AsyncIOScheduler()
+
+# ==== Cleanup Jobs ====
+async def auto_cleanup_deleted_dishes():
+    """
+    Automatically cleanup dishes deleted more than 7 days ago.
+    This runs daily at 2:00 AM server time.
+    """
+    try:
+        from routes.dish_route import dishes_collection, comments_collection, recipe_collection
+        import cloudinary
+        
+        CLOUDINARY_ENABLED = os.getenv("CLOUDINARY_ENABLED", "false").lower() == "true"
+        
+        logging.info("🗑️ Starting automatic cleanup of deleted dishes...")
+        
+        # Calculate cutoff date (7 days ago)
+        cutoff_date = datetime.utcnow() - timedelta(days=7)
+        
+        # Find dishes deleted more than 7 days ago
+        old_deleted_dishes = await dishes_collection.find({
+            "deleted_at": {"$exists": True, "$lt": cutoff_date}
+        }).to_list(length=None)
+        
+        cleanup_stats = {
+            "dishes_deleted": 0,
+            "images_deleted": 0,
+            "comments_deleted": 0,
+            "recipes_deleted": 0,
+            "errors": []
+        }
+        
+        for dish in old_deleted_dishes:
+            dish_id = str(dish["_id"])
+            
+            try:
+                # Delete Cloudinary image
+                if CLOUDINARY_ENABLED and dish.get("image_url"):
+                    try:
+                        public_id = dish.get("public_id")
+                        if not public_id and dish.get("image_url"):
+                            # Extract from URL
+                            url_parts = dish["image_url"].split("/upload/")
+                            if len(url_parts) > 1:
+                                path_with_version = url_parts[1]
+                                path_parts = path_with_version.split("/")
+                                if len(path_parts) > 1:
+                                    filename_with_ext = "/".join(path_parts[1:])
+                                    public_id = filename_with_ext.rsplit(".", 1)[0]
+                        
+                        if public_id:
+                            cloudinary.uploader.destroy(public_id)
+                            cleanup_stats["images_deleted"] += 1
+                    except Exception as e:
+                        logging.error(f"Failed to delete Cloudinary image for dish {dish_id}: {e}")
+                
+                # Hard delete comments
+                comments_result = await comments_collection.delete_many({"dish_id": dish_id})
+                cleanup_stats["comments_deleted"] += comments_result.deleted_count
+                
+                # Hard delete recipe
+                recipe_result = await recipe_collection.delete_one({"dish_id": dish_id})
+                cleanup_stats["recipes_deleted"] += recipe_result.deleted_count
+                
+                # Hard delete dish
+                await dishes_collection.delete_one({"_id": dish["_id"]})
+                cleanup_stats["dishes_deleted"] += 1
+                
+            except Exception as e:
+                error_msg = f"Failed to permanently delete dish {dish_id}: {str(e)}"
+                logging.error(error_msg)
+                cleanup_stats["errors"].append(error_msg)
+        
+        logging.info(f"✅ Automatic cleanup completed: {cleanup_stats}")
+        
+    except Exception as e:
+        logging.error(f"❌ Error in auto_cleanup_deleted_dishes: {e}")
+
 # ==== Startup Events ====
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on startup"""
     await init_redis()
+    
+    # Run cleanup immediately on startup (catch-up for any missed jobs)
+    logging.info("🧹 Running startup cleanup check...")
+    await auto_cleanup_deleted_dishes()
+    
+    # Start background scheduler
+    if not scheduler.running:
+        # Schedule cleanup job to run daily at 2:00 AM
+        scheduler.add_job(
+            auto_cleanup_deleted_dishes,
+            CronTrigger(hour=2, minute=0),  # 2:00 AM every day
+            id="cleanup_deleted_dishes",
+            name="Cleanup dishes deleted >7 days ago",
+            replace_existing=True
+        )
+        scheduler.start()
+        logging.info("✅ Background scheduler started - Daily cleanup at 2:00 AM")
+    
     print("🚀 Backend services initialized")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    if scheduler.running:
+        scheduler.shutdown()
+        logging.info("🛑 Background scheduler stopped")
 
 # Include các routers từ routes
 from routes import user_route, dish_route, recipe_route, search_route, comment_route, otp_route

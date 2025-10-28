@@ -33,7 +33,14 @@ from utils.user_handlers import (
     # Preferences handlers
     get_my_notifications_handler,
     set_reminders_handler,
-    get_reminders_handler
+    get_reminders_handler,
+    
+    # Admin handlers
+    is_admin,
+    cleanup_dishes_handler,
+    permanent_delete_old_dishes_handler,
+    migrate_difficulty_to_dishes_handler,
+    migrate_existing_images_handler
 )
 
 # Main router
@@ -105,6 +112,14 @@ async def get_user(user_id: str):
 @router.get("/me/favorites")
 async def get_my_favorites(decoded=Depends(get_current_user)):
     return await get_my_favorites_handler(decoded)
+
+@router.get("/me/is-admin")
+async def check_is_admin(decoded=Depends(get_current_user)):
+    """
+    Check if current user is admin
+    """
+    admin_status = await is_admin(decoded)
+    return {"isAdmin": admin_status}
 
 # ==================== SOCIAL ROUTES ====================
 @router.get("/me/social")
@@ -258,3 +273,37 @@ async def get_view_history(limit: int = 50, decoded=Depends(get_current_user)):
         items = items[:limit]
 
     return {"items": items, "count": len(items)}
+
+
+# ==================== ADMIN ROUTES ====================
+
+@router.post("/admin/cleanup")
+async def cleanup_dishes(decoded=Depends(get_current_user)):
+    """
+    Admin: Cleanup invalid dishes and migrate image fields
+    """
+    return await cleanup_dishes_handler(decoded)
+
+
+@router.post("/admin/cleanup-deleted")
+async def permanent_delete_old_dishes(decoded=Depends(get_current_user)):
+    """
+    Admin: Permanently delete dishes that have been soft-deleted for >7 days
+    """
+    return await permanent_delete_old_dishes_handler(decoded)
+
+
+@router.post("/admin/migrate-difficulty")
+async def migrate_difficulty_to_dishes(decoded=Depends(get_current_user)):
+    """
+    Admin: Migrate difficulty field from recipes to dishes
+    """
+    return await migrate_difficulty_to_dishes_handler(decoded)
+
+
+@router.post("/admin/migrate-images")
+async def migrate_existing_images(decoded=Depends(get_current_user)):
+    """
+    Admin: Migrate existing base64 images to Cloudinary
+    """
+    return await migrate_existing_images_handler(decoded)

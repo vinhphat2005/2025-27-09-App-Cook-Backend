@@ -3,9 +3,14 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from models.dish_model import Dish, DishOut, DishIn
 from models.dish_with_recipe_model import DishWithRecipeIn, DishWithRecipeOut
 from models.dish_response_models import DishDetailOut, DishWithRecipeDetailOut, RecipeDetailOut
-from database.mongo import dishes_collection, users_collection, recipe_collection
+from database.mongo import dishes_collection, users_collection, recipe_collection, comments_collection
+from main_async import user_activity_col  # ✅ Import for delete operations
+
+# ✅ Alias for consistency
+user_activity_collection = user_activity_col
+recipes_collection = recipe_collection
 from bson import ObjectId
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from core.auth.dependencies import get_current_user, get_user_by_email, extract_user_email
 from typing import List, Optional, Dict
 from pydantic import BaseModel
@@ -17,7 +22,10 @@ from dotenv import load_dotenv
 import base64
 import io
 import logging
-load_dotenv() 
+load_dotenv()
+
+# ✅ Import is_admin from user_handlers
+from utils.user_handlers import is_admin 
 
 # ✅ Safer Cloudinary configuration - check at startup, not import
 def _configure_cloudinary():
@@ -446,158 +454,6 @@ async def toggle_favorite_dish(dish_id: str, decoded=Depends(get_current_user)):
         logger.error(f"🆔 User UID: {decoded.get('uid', 'N/A')}")
         raise HTTPException(status_code=500, detail=f"Failed to toggle favorite: {str(e)}")
 
-def _check_admin_access(decoded):
-    """
-    Check if user has admin access
-    For now, checking DEBUG environment or specific admin emails
-    """
-    import os
-    
-    # Allow in DEBUG mode
-    if os.getenv("DEBUG", "False").lower() == "true":
-        return True
-    
-    # Check for admin emails (add your admin emails here)
-    user_email = extract_user_email(decoded)
-    admin_emails = os.getenv("ADMIN_EMAILS", "").split(",")
-    admin_emails = [email.strip() for email in admin_emails if email.strip()]
-    
-    if user_email in admin_emails:
-        return True
-    
-    # You can add role-based check here if you have user roles in database
-    # user = await users_collection.find_one({"email": user_email})
-    # if user and user.get("role") == "admin":
-    #     return True
-    
-    return False
-
-# Admin routes
-@router.post("/admin/cleanup")
-async def cleanup_dishes(decoded=Depends(get_current_user)):
-    # ✅ Check admin access
-    if not _check_admin_access(decoded):
-        raise HTTPException(status_code=403, detail="Admin access required")
-    
-    res = await dishes_collection.delete_many({
-        "$or": [
-            {"name": {"$exists": False}},
-            {"name": ""},
-            {"name": None}
-        ]
-    })
-    
-    migration_res = await dishes_collection.update_many(
-        {},
-        {"$unset": {"image_b64": "", "image_mime": ""}}
-    )
-    
-    recipe_migration_res = await recipe_collection.update_many(
-        {},
-        {"$unset": {"image_b64": "", "image_mime": ""}}
-    )
-    
-    return {
-        "deleted_count": res.deleted_count, 
-        "dishes_migrated": migration_res.modified_count,
-        "recipes_migrated": recipe_migration_res.modified_count,
-        "message": "Cleanup and migration completed"
-    }
-
-@router.post("/admin/migrate-difficulty")
-async def migrate_difficulty_to_dishes(decoded=Depends(get_current_user)):
-    # ✅ Check admin access
-    if not _check_admin_access(decoded):
-        raise HTTPException(status_code=403, detail="Admin access required")
-    
-    migrated_count = 0
-    
-    dishes_cursor = dishes_collection.find({
-        "recipe_id": {"$exists": True, "$ne": None},
-        "difficulty": {"$exists": False}
-    })
-    
-    async for dish in dishes_cursor:
-        try:
-            recipe_id = dish.get("recipe_id")
-            if recipe_id:
-                # ✅ Validate ObjectId before using
-                if ObjectId.is_valid(recipe_id):
-                    recipe = await recipe_collection.find_one({"_id": ObjectId(recipe_id)})
-                    if recipe and recipe.get("difficulty"):
-                        await dishes_collection.update_one(
-                            {"_id": dish["_id"]},
-                            {"$set": {"difficulty": recipe["difficulty"]}}
-                        )
-                        migrated_count += 1
-                        logging.info(f"Migrated difficulty '{recipe['difficulty']}' for dish: {dish.get('name')}")
-                else:
-                    logging.warning(f"Invalid recipe_id format: {recipe_id} for dish: {dish.get('name')}")
-        except Exception as e:
-            logging.error(f"Failed to migrate dish {dish.get('_id')}: {str(e)}")
-    
-    return {
-        "migrated_count": migrated_count,
-        "message": f"Successfully migrated difficulty for {migrated_count} dishes"
-    }
-
-@router.post("/admin/migrate-images")
-async def migrate_existing_images(decoded=Depends(get_current_user)):
-    # ✅ Check admin access
-    if not _check_admin_access(decoded):
-        raise HTTPException(status_code=403, detail="Admin access required")
-    
-    migrated_dishes = 0
-    migrated_recipes = 0
-    
-    dishes_cursor = dishes_collection.find({"image_b64": {"$exists": True, "$ne": None}})
-    async for dish in dishes_cursor:
-        try:
-            if dish.get("image_b64") and dish.get("image_mime"):
-                upload_result = await upload_image_to_cloudinary(
-                    dish["image_b64"], 
-                    dish["image_mime"], 
-                    folder="dishes_migration"
-                )
-                
-                await dishes_collection.update_one(
-                    {"_id": dish["_id"]},
-                    {
-                        "$set": {"image_url": upload_result["secure_url"]},
-                        "$unset": {"image_b64": "", "image_mime": ""}
-                    }
-                )
-                migrated_dishes += 1
-        except Exception as e:
-            logging.error(f"Failed to migrate dish {dish['_id']}: {str(e)}")
-    
-    recipes_cursor = recipe_collection.find({"image_b64": {"$exists": True, "$ne": None}})
-    async for recipe in recipes_cursor:
-        try:
-            if recipe.get("image_b64") and recipe.get("image_mime"):
-                upload_result = await upload_image_to_cloudinary(
-                    recipe["image_b64"], 
-                    recipe["image_mime"], 
-                    folder="recipes_migration"
-                )
-                
-                await recipe_collection.update_one(
-                    {"_id": recipe["_id"]},
-                    {
-                        "$set": {"image_url": upload_result["secure_url"]},
-                        "$unset": {"image_b64": "", "image_mime": ""}
-                    }
-                )
-                migrated_recipes += 1
-        except Exception as e:
-            logging.error(f"Failed to migrate recipe {recipe['_id']}: {str(e)}")
-    
-    return {
-        "migrated_dishes": migrated_dishes,
-        "migrated_recipes": migrated_recipes,
-        "message": "Image migration completed"
-    }
-
 # ============= GET ROUTES (SPECIFIC FIRST, DYNAMIC LAST) =============
 
 # FIXED: High-rated dishes endpoint for Recipe screen
@@ -613,7 +469,8 @@ async def get_high_rated_dishes(min_rating: float = 4.0, limit: int = 50, skip: 
         # Query for dishes with rating >= min_rating AND valid name
         query = {
             "name": {"$exists": True, "$ne": "", "$ne": None},
-            "average_rating": {"$gte": min_rating}
+            "average_rating": {"$gte": min_rating},
+            "deleted_at": {"$exists": False}  # ✅ Exclude deleted dishes
         }
         
         logging.info(f"High-rated query: {query}")
@@ -641,11 +498,13 @@ async def get_high_rated_dishes(min_rating: float = 4.0, limit: int = 50, skip: 
 async def get_my_dishes(
     limit: int = 50,
     skip: int = 0,
+    search: Optional[str] = None,
     decoded=Depends(get_current_user)
 ):
     """
     CRITICAL: Returns dishes created by current user
     Used by Profile screen to show user's dishes
+    Supports search by dish name
     """
     try:
         user_email = extract_user_email(decoded)
@@ -657,12 +516,13 @@ async def get_my_dishes(
         
         user_id, user_email_from_doc, user_username = _get_user_identification(user)
         
-        logging.info(f"Fetching dishes for user - ID: {user_id}, Email: {user_email_from_doc}")
+        logging.info(f"Fetching dishes for user - ID: {user_id}, Email: {user_email_from_doc}, Search: {search}")
         
         # Build comprehensive query to find user's dishes
         # Check multiple possible fields where user ID might be stored
         query = {
             "name": {"$exists": True, "$ne": "", "$ne": None},  # Valid dish name
+            "deleted_at": {"$exists": False},  # ✅ Exclude soft-deleted dishes
             "$or": [
                 {"creator_id": user_id},           # String version of user ID
                 {"created_by": user_email_from_doc},  # User email
@@ -680,10 +540,19 @@ async def get_my_dishes(
         if user_username:
             query["$or"].append({"created_by": user_username})
         
+        # Add search filter if provided
+        if search and search.strip():
+            query["name"] = {"$regex": search.strip(), "$options": "i"}
+        
         logging.info(f"My dishes query: {query}")
         
-        cursor = dishes_collection.find(query).sort("created_at", -1).skip(skip).limit(limit)
-        user_dishes = await cursor.to_list(length=limit)
+        # When searching, return all results (no limit)
+        actual_limit = limit if not search else 0
+        cursor = dishes_collection.find(query).sort("created_at", -1).skip(skip)
+        if actual_limit > 0:
+            cursor = cursor.limit(actual_limit)
+            
+        user_dishes = await cursor.to_list(length=None if not actual_limit else actual_limit)
         
         logging.info(f"Found {len(user_dishes)} dishes for user {user_id}")
         
@@ -708,7 +577,10 @@ async def suggest_today(limit: int = 12):
     Returns recent dishes for today's suggestions
     """
     try:
-        query = {"name": {"$exists": True, "$ne": "", "$ne": None}}
+        query = {
+            "name": {"$exists": True, "$ne": "", "$ne": None},
+            "deleted_at": {"$exists": False}  # ✅ Exclude deleted dishes
+        }
         cursor = dishes_collection.find(query).sort("created_at", -1).limit(limit)
         docs = await cursor.to_list(length=limit)
         return [_to_detail_out(d) for d in docs]
@@ -723,7 +595,10 @@ async def get_random_dishes(limit: int = 3):
     """
     try:
         pipeline = [
-            {"$match": {"name": {"$exists": True, "$ne": "", "$ne": None}}},
+            {"$match": {
+                "name": {"$exists": True, "$ne": "", "$ne": None},
+                "deleted_at": {"$exists": False}  # ✅ Exclude deleted dishes
+            }},
             {"$sample": {"size": limit}},
         ]
         
@@ -805,6 +680,257 @@ async def get_dishes(
         logging.error(f"Error in get_dishes: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch dishes: {str(e)}")
 
+# ============= TRASH / RECYCLE BIN ENDPOINTS =============
+# ⚠️ MUST come BEFORE dynamic routes (/{dish_id}) to avoid "trash" being treated as dish_id
+
+@router.get("/trash")
+async def get_trash_dishes(decoded=Depends(get_current_user)):
+    """
+    Get all soft-deleted dishes for current user (trash/recycle bin)
+    
+    ✅ Returns dishes with deleted_at not null
+    ✅ Only shows user's own deleted dishes
+    ✅ Includes recovery_deadline (deleted_at + 7 days)
+    ✅ Sorted by deleted_at (newest first)
+    """
+    try:
+        logging.info(f"📋 GET /trash - Starting request")
+        logging.info(f"🔍 Decoded token: {decoded}")
+        
+        # Get user from decoded token (same pattern as get_my_dishes)
+        user_email = extract_user_email(decoded)
+        logging.info(f"✅ Extracted email: {user_email}")
+        
+        user = await get_user_by_email(user_email, decoded)
+        
+        if not user:
+            logging.error(f"❌ User not found for email: {user_email}")
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        user_id = str(user["_id"])
+        logging.info(f"✅ User ID: {user_id}")
+        
+        # Find deleted dishes
+        query = {
+            "creator_id": user_id,
+            "deleted_at": {"$exists": True, "$ne": None}  # ✅ Better MongoDB query
+        }
+        logging.info(f"🔍 Query: {query}")
+        
+        deleted_dishes = await dishes_collection.find(query).sort("deleted_at", -1).to_list(length=None)
+        logging.info(f"📊 Found {len(deleted_dishes)} deleted dishes")
+        
+        # Convert to response format
+        result = []
+        for dish in deleted_dishes:
+            dish_data = {
+                "id": str(dish["_id"]),
+                "label": dish.get("name", ""),
+                "image": dish.get("image_url", ""),
+                "time": f"{dish.get('cooking_time', 0)} phút",
+                "star": dish.get("average_rating", 0),
+                "level": dish.get("difficulty", "easy"),
+                "isFavorite": False,  # Deleted dishes are not favorite
+            }
+            
+            if dish.get("deleted_at"):
+                # Add 7 days to deleted_at for recovery deadline
+                recovery_deadline = dish["deleted_at"] + timedelta(days=7)
+                dish_data["deleted_at"] = dish["deleted_at"].isoformat()
+                dish_data["recovery_deadline"] = recovery_deadline.isoformat()
+            
+            result.append(dish_data)
+        
+        logging.info(f"User {user_id} fetched {len(result)} deleted dishes from trash")
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error fetching trash dishes: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch trash: {str(e)}")
+
+
+@router.post("/{dish_id}/restore")
+async def restore_dish(dish_id: str, decoded=Depends(get_current_user)):
+    """
+    Restore a soft-deleted dish
+    
+    ✅ Only dish owner can restore
+    ✅ Removes deleted_at and deleted_by fields
+    ✅ Dish becomes visible again in listings
+    """
+    try:
+        # Validate dish ID
+        dish_oid = _validate_object_id(dish_id, "dish_id")
+        
+        # Get dish
+        dish = await dishes_collection.find_one({"_id": dish_oid})
+        if not dish:
+            raise HTTPException(status_code=404, detail="Dish not found")
+        
+        # Check if deleted
+        if not dish.get("deleted_at"):
+            raise HTTPException(status_code=400, detail="Dish is not deleted")
+        
+        # Verify ownership
+        user_email = extract_user_email(decoded)
+        user = await get_user_by_email(user_email, decoded)
+        user_id = str(user["_id"])
+        
+        if dish.get("creator_id") != user_id:
+            logging.warning(f"Unauthorized restore attempt: User {user_id} tried to restore dish {dish_id}")
+            raise HTTPException(
+                status_code=403,
+                detail="You can only restore your own dishes"
+            )
+        
+        # Restore dish - remove deleted fields
+        await dishes_collection.update_one(
+            {"_id": dish_oid},
+            {
+                "$unset": {
+                    "deleted_at": "",
+                    "deleted_by": ""
+                },
+                "$set": {
+                    "updated_at": datetime.now(timezone.utc)
+                }
+            }
+        )
+        
+        logging.info(f"Dish {dish_id} restored by user {user_id}")
+        
+        return {
+            "message": "Dish restored successfully",
+            "dish_id": dish_id,
+            "restored_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error restoring dish {dish_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to restore dish: {str(e)}")
+
+
+@router.delete("/{dish_id}/permanent")
+async def permanent_delete_dish(dish_id: str, decoded=Depends(get_current_user)):
+    """
+    Permanently delete a soft-deleted dish
+    
+    ⚠️ WARNING: This action CANNOT be undone!
+    
+    ✅ Only dish owner can permanently delete
+    ✅ Dish must be already soft-deleted
+    ✅ Removes from database completely
+    ✅ Deletes associated recipe, comments, favorites
+    ✅ Deletes image from Cloudinary
+    """
+    try:
+        # Validate dish ID
+        dish_oid = _validate_object_id(dish_id, "dish_id")
+        
+        # Get dish
+        dish = await dishes_collection.find_one({"_id": dish_oid})
+        if not dish:
+            raise HTTPException(status_code=404, detail="Dish not found")
+        
+        # Check if deleted
+        if not dish.get("deleted_at"):
+            raise HTTPException(
+                status_code=400, 
+                detail="Dish must be soft-deleted first. Use DELETE /{dish_id} to soft-delete."
+            )
+        
+        # Verify ownership
+        user_email = extract_user_email(decoded)
+        user = await get_user_by_email(user_email, decoded)
+        user_id = str(user["_id"])
+        
+        if dish.get("creator_id") != user_id:
+            logging.warning(f"Unauthorized permanent delete attempt: User {user_id} tried to delete dish {dish_id}")
+            raise HTTPException(
+                status_code=403,
+                detail="You can only permanently delete your own dishes"
+            )
+        
+        # ✅ 1. Delete associated recipe
+        recipe_deleted = False
+        if dish.get("recipe_id"):
+            try:
+                recipe_oid = ObjectId(dish["recipe_id"])
+                result = await recipes_collection.delete_one({"_id": recipe_oid})
+                recipe_deleted = result.deleted_count > 0
+                logging.info(f"Deleted recipe {dish['recipe_id']} for dish {dish_id}")
+            except Exception as e:
+                logging.error(f"Error deleting recipe: {str(e)}")
+        
+        # ✅ 2. Delete all comments
+        comments_deleted = 0
+        try:
+            result = await comments_collection.delete_many({"dish_id": dish_id})
+            comments_deleted = result.deleted_count
+            logging.info(f"Deleted {comments_deleted} comments for dish {dish_id}")
+        except Exception as e:
+            logging.error(f"Error deleting comments: {str(e)}")
+        
+        # ✅ 3. Remove from all users' favorites
+        favorites_removed = 0
+        try:
+            result = await users_collection.update_many(
+                {"favorite_dishes": dish_id},
+                {"$pull": {"favorite_dishes": dish_id}}
+            )
+            favorites_removed = result.modified_count
+            logging.info(f"Removed dish {dish_id} from {favorites_removed} users' favorites")
+        except Exception as e:
+            logging.error(f"Error removing from favorites: {str(e)}")
+        
+        # ✅ 4. Delete from user activity
+        activity_deleted = 0
+        try:
+            result = await user_activity_collection.delete_many({"target_id": dish_id})
+            activity_deleted = result.deleted_count
+            logging.info(f"Deleted {activity_deleted} activity records for dish {dish_id}")
+        except Exception as e:
+            logging.error(f"Error deleting activity: {str(e)}")
+        
+        # ✅ 5. Delete image from Cloudinary
+        cloudinary_deleted = False
+        if dish.get("image_url"):
+            try:
+                from utils.cloudinary_helper import delete_image_from_cloudinary
+                cloudinary_deleted = await delete_image_from_cloudinary(dish["image_url"])
+                logging.info(f"Deleted Cloudinary image for dish {dish_id}")
+            except Exception as e:
+                logging.error(f"Error deleting Cloudinary image: {str(e)}")
+        
+        # ✅ 6. Permanently delete dish from database
+        await dishes_collection.delete_one({"_id": dish_oid})
+        
+        logging.warning(f"PERMANENT DELETE: Dish {dish_id} permanently deleted by user {user_id}")
+        
+        return {
+            "message": "Dish permanently deleted",
+            "dish_id": dish_id,
+            "deleted_at": datetime.now(timezone.utc).isoformat(),
+            "cleanup_summary": {
+                "recipe_deleted": recipe_deleted,
+                "comments_deleted": comments_deleted,
+                "favorites_removed": favorites_removed,
+                "activity_deleted": activity_deleted,
+                "cloudinary_deleted": cloudinary_deleted
+            },
+            "warning": "⚠️ This action cannot be undone!"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error permanently deleting dish {dish_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to permanently delete dish: {str(e)}")
+
 # ============= DYNAMIC ROUTES (MUST COME LAST) =============
 
 @router.get("/{dish_id}", response_model=DishDetailOut)
@@ -847,20 +973,22 @@ async def get_dish_with_recipe(dish_id: str):
                 if ObjectId.is_valid(recipe_id):
                     r = await recipe_collection.find_one({"_id": ObjectId(recipe_id)})
                     if r:
-                        recipe = RecipeDetailOut(
+                        # Create RecipeDetailOut and convert to dict for Pydantic validation
+                        recipe_obj = RecipeDetailOut(
                             id=str(r["_id"]),
                             name=r.get("name", ""),
-                            description=r.get("description", ""),
-                            ingredients=r.get("ingredients", []),
-                            difficulty=r.get("difficulty", ""),
                             instructions=r.get("instructions", []),
-                            average_rating=float(r.get("average_rating", 0.0)),
-                            image_url=r.get("image_url"),
+                            cooking_time=int(r.get("cooking_time", 0)),
+                            difficulty=r.get("difficulty", ""),
+                            serves=int(r.get("serves", 1)),
+                            creator_id=r.get("creator_id"),
                             created_by=r.get("created_by"),
-                            dish_id=r.get("dish_id"),
+                            dish_id=str(r.get("dish_id", "")),
                             ratings=r.get("ratings", []),
                             created_at=r.get("created_at"),
                         )
+                        # Convert to dict for DishWithRecipeDetailOut validation
+                        recipe = recipe_obj.model_dump()
                 else:
                     logging.warning(f"Invalid recipe_id format: {recipe_id} for dish: {dish_id}")
             except Exception as recipe_e:
@@ -877,3 +1005,176 @@ async def get_dish_with_recipe(dish_id: str):
     except Exception as e:
         logging.error(f"Error getting dish with recipe {dish_id}: {str(e)}")
         raise HTTPException(status_code=404, detail="Dish not found")
+
+
+# ============= DELETE DISH WITH SOFT DELETE =============
+
+@router.delete("/{dish_id}")
+async def soft_delete_dish(dish_id: str, decoded=Depends(get_current_user)):
+    """
+    Soft delete a dish (mark as deleted) with comprehensive cleanup
+    
+    ✅ Security: Only dish owner can delete
+    ✅ Soft delete: Set deleted_at timestamp (allows recovery for 7 days)
+    ✅ Cleanup: Remove from favorites, comments, user_activity
+    ✅ Cloudinary: Delete image from cloud storage
+    ✅ Logging: Audit trail for deletion
+    
+    After 7 days, use /admin/cleanup-deleted endpoint to permanently delete
+    """
+    try:
+        # ✅ 1. Validate dish ID
+        dish_oid = _validate_object_id(dish_id, "dish_id")
+        
+        # ✅ 2. Get dish and verify ownership
+        dish = await dishes_collection.find_one({"_id": dish_oid})
+        if not dish:
+            raise HTTPException(status_code=404, detail="Dish not found")
+        
+        # Check if already deleted
+        if dish.get("deleted_at"):
+            raise HTTPException(status_code=400, detail="Dish already deleted")
+        
+        # ✅ 3. Verify ownership - CRITICAL SECURITY CHECK
+        user_email = extract_user_email(decoded)
+        user = await get_user_by_email(user_email, decoded)
+        user_id = str(user["_id"])
+        
+        if dish.get("creator_id") != user_id:
+            logging.warning(f"Unauthorized delete attempt: User {user_id} tried to delete dish {dish_id} owned by {dish.get('creator_id')}")
+            raise HTTPException(
+                status_code=403, 
+                detail="You can only delete your own dishes"
+            )
+        
+        now = datetime.now(timezone.utc)
+        
+        # ✅ 4. Soft delete dish - mark as deleted
+        await dishes_collection.update_one(
+            {"_id": dish_oid},
+            {
+                "$set": {
+                    "deleted_at": now,
+                    "deleted_by": user_id,
+                    "updated_at": now
+                }
+            }
+        )
+        
+        logging.info(f"Dish {dish_id} soft deleted by user {user_id} at {now}")
+        
+        # ✅ 5. Delete Cloudinary image (if exists)
+        cloudinary_deleted = False
+        image_info = None
+        
+        if CLOUDINARY_ENABLED:
+            try:
+                # Try to extract public_id from image_url or use stored public_id
+                public_id = dish.get("image_public_id")  # If stored separately
+                
+                if not public_id and dish.get("image_url"):
+                    # Extract public_id from Cloudinary URL
+                    # URL format: https://res.cloudinary.com/<cloud>/image/upload/v<version>/<public_id>
+                    image_url = dish.get("image_url", "")
+                    if "cloudinary.com" in image_url:
+                        parts = image_url.split("/")
+                        if len(parts) >= 2:
+                            # Get last part and remove extension
+                            filename = parts[-1].split(".")[0]
+                            folder = parts[-2] if len(parts) >= 3 else "dishes"
+                            public_id = f"{folder}/{filename}"
+                
+                if public_id:
+                    result = cloudinary.uploader.destroy(public_id)
+                    cloudinary_deleted = (result.get("result") == "ok")
+                    image_info = {"public_id": public_id, "result": result}
+                    logging.info(f"Cloudinary image deleted: {public_id}, result: {result}")
+                else:
+                    logging.warning(f"No public_id found for dish {dish_id}")
+                    
+            except Exception as e:
+                logging.error(f"Failed to delete Cloudinary image for dish {dish_id}: {str(e)}")
+                # Continue even if image deletion fails
+        
+        # ✅ 6. Remove from all users' favorites
+        favorite_removal_result = await users_collection.update_many(
+            {"favorite_dishes": dish_id},
+            {"$pull": {"favorite_dishes": dish_id}}
+        )
+        favorites_removed_count = favorite_removal_result.modified_count
+        
+        logging.info(f"Removed dish {dish_id} from {favorites_removed_count} users' favorites")
+        
+        # ✅ 7. Remove from user_activity (viewed_dishes_and_users)
+        activity_removal_result = await user_activity_col.update_many(
+            {"viewed_dishes_and_users.id": dish_id},
+            {"$pull": {"viewed_dishes_and_users": {"type": "dish", "id": dish_id}}}
+        )
+        activity_removed_count = activity_removal_result.modified_count
+        
+        logging.info(f"Removed dish {dish_id} from {activity_removed_count} users' view history")
+        
+        # ✅ 8. Soft delete all comments (mark as deleted)
+        comments_deletion_result = await comments_collection.update_many(
+            {"dish_id": dish_id, "deleted_at": {"$exists": False}},
+            {"$set": {"deleted_at": now, "deleted_by": user_id}}
+        )
+        comments_deleted_count = comments_deletion_result.modified_count
+        
+        logging.info(f"Soft deleted {comments_deleted_count} comments for dish {dish_id}")
+        
+        # ✅ 9. Delete associated recipe (if exists)
+        recipe_deleted = False
+        recipe_id = dish.get("recipe_id")
+        if recipe_id and ObjectId.is_valid(recipe_id):
+            try:
+                recipe_deletion_result = await recipe_collection.delete_one(
+                    {"_id": ObjectId(recipe_id)}
+                )
+                recipe_deleted = (recipe_deletion_result.deleted_count > 0)
+                logging.info(f"Deleted recipe {recipe_id} for dish {dish_id}")
+            except Exception as e:
+                logging.error(f"Failed to delete recipe {recipe_id}: {str(e)}")
+        
+        # ✅ 10. Audit log
+        audit_log = {
+            "action": "dish_soft_delete",
+            "dish_id": dish_id,
+            "dish_name": dish.get("name", ""),
+            "user_id": user_id,
+            "user_email": user_email,
+            "timestamp": now,
+            "cleanup_stats": {
+                "favorites_removed": favorites_removed_count,
+                "activity_removed": activity_removed_count,
+                "comments_deleted": comments_deleted_count,
+                "recipe_deleted": recipe_deleted,
+                "cloudinary_deleted": cloudinary_deleted,
+                "image_info": image_info
+            }
+        }
+        
+        logging.info(f"Dish deletion audit: {audit_log}")
+        
+        # ✅ 11. Return success response
+        return {
+            "success": True,
+            "message": "Dish soft deleted successfully",
+            "dish_id": dish_id,
+            "deleted_at": now.isoformat(),
+            "recovery_deadline": (now + timedelta(days=7)).isoformat(),
+            "cleanup_summary": {
+                "favorites_removed": favorites_removed_count,
+                "activity_removed": activity_removed_count,
+                "comments_deleted": comments_deleted_count,
+                "recipe_deleted": recipe_deleted,
+                "cloudinary_deleted": cloudinary_deleted
+            },
+            "note": "This dish can be recovered within 7 days. After that, it will be permanently deleted by cleanup job."
+        }
+        
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions
+    except Exception as e:
+        logging.error(f"Error deleting dish {dish_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete dish: {str(e)}")

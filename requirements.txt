@@ -13,3 +13,4 @@ requests==2.31.0
 cloudinary
 firebase-admin==6.2.0
 redis==5.0.1
+apscheduler==3.10.4

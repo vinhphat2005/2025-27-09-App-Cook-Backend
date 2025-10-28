@@ -8,7 +8,7 @@ from core.auth.dependencies import extract_user_email, get_user_by_email
 from models.user_model import UserOut
 from bson import ObjectId
 from typing import Dict, Any, List
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from database.mongo import (
     users_collection,
@@ -18,6 +18,60 @@ from database.mongo import (
     user_preferences_collection,
     dishes_collection
 )
+
+
+async def is_admin(decoded) -> bool:
+    """
+    Shared async helper to check if a user is admin.
+    Checks (in order):
+      - custom claims in decoded token (admin)
+      - ADMIN_EMAILS env var
+      - role=='admin' in users_collection
+
+    Returns True if admin, False otherwise.
+    
+    ⚠️ SECURITY: DEBUG mode does NOT grant admin access!
+    """
+    import os, logging
+    
+    # ❌ REMOVED: DEBUG mode granting admin to everyone (SECURITY RISK!)
+    # if os.getenv("DEBUG", "False").lower() == "true":
+    #     return True
+
+    # 1) Token claims
+    try:
+        if decoded:
+            if decoded.get("admin"):
+                return True
+            claims = decoded.get("claims") or decoded.get("__claims__") or {}
+            if isinstance(claims, dict) and claims.get("admin"):
+                return True
+            firebase_meta = decoded.get("firebase") or {}
+            if isinstance(firebase_meta, dict) and firebase_meta.get("admin"):
+                return True
+    except Exception:
+        pass
+
+    # 2) ADMIN_EMAILS
+    try:
+        user_email = extract_user_email(decoded)
+        admin_emails = os.getenv("ADMIN_EMAILS", "").split(",")
+        admin_emails = [e.strip() for e in admin_emails if e.strip()]
+        if user_email and user_email in admin_emails:
+            return True
+    except Exception:
+        pass
+
+    # 3) DB role
+    try:
+        if user_email:
+            user_doc = await users_collection.find_one({"email": user_email})
+            if user_doc and user_doc.get("role") == "admin":
+                return True
+    except Exception:
+        logging.exception("Failed to check user role for admin access")
+
+    return False
 
 
 # ==================== PROFILE HANDLERS ====================
@@ -503,3 +557,233 @@ async def get_my_favorites_handler(decoded):
             dishes.append(dish)
 
     return dishes
+
+
+# ==================== ADMIN HANDLERS ====================
+
+async def cleanup_dishes_handler(decoded):
+    """
+    Admin: Cleanup invalid dishes and migrate image fields
+    """
+    if not await is_admin(decoded):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    res = await dishes_collection.delete_many({
+        "$or": [
+            {"name": {"$exists": False}},
+            {"name": ""},
+            {"name": None}
+        ]
+    })
+    
+    migration_res = await dishes_collection.update_many(
+        {},
+        {"$unset": {"image_b64": "", "image_mime": ""}}
+    )
+    
+    # Import recipe_collection nếu cần
+    from database.mongo import recipe_collection
+    
+    recipe_migration_res = await recipe_collection.update_many(
+        {},
+        {"$unset": {"image_b64": "", "image_mime": ""}}
+    )
+    
+    return {
+        "deleted_count": res.deleted_count, 
+        "dishes_migrated": migration_res.modified_count,
+        "recipes_migrated": recipe_migration_res.modified_count,
+        "message": "Cleanup and migration completed"
+    }
+
+
+async def permanent_delete_old_dishes_handler(decoded):
+    """
+    Admin: Permanently delete dishes that have been soft-deleted for >7 days
+    """
+    if not await is_admin(decoded):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    import logging
+    
+    # Calculate cutoff date (7 days ago)
+    cutoff_date = datetime.now(timezone.utc) - timedelta(days=7)
+    
+    # Find dishes deleted more than 7 days ago
+    old_deleted_dishes = await dishes_collection.find({
+        "deleted_at": {"$exists": True, "$lt": cutoff_date}
+    }).to_list(length=None)
+    
+    cleanup_stats = {
+        "dishes_deleted": 0,
+        "images_deleted": 0,
+        "comments_deleted": 0,
+        "recipes_deleted": 0,
+        "errors": []
+    }
+    
+    # Import collections needed
+    from database.mongo import recipe_collection, comments_collection
+    
+    for dish in old_deleted_dishes:
+        dish_id = str(dish["_id"])
+        
+        try:
+            # 1. Delete Cloudinary image if exists
+            if dish.get("cloudinary_public_id"):
+                try:
+                    import cloudinary
+                    cloudinary.uploader.destroy(dish["cloudinary_public_id"])
+                    cleanup_stats["images_deleted"] += 1
+                except Exception as e:
+                    cleanup_stats["errors"].append(f"Failed to delete image for dish {dish_id}: {str(e)}")
+            
+            # 2. Delete associated comments
+            comments_result = await comments_collection.delete_many({"dish_id": dish_id})
+            cleanup_stats["comments_deleted"] += comments_result.deleted_count
+            
+            # 3. Delete associated recipe if exists
+            if dish.get("recipe_id"):
+                recipe_result = await recipe_collection.delete_one({"_id": ObjectId(dish["recipe_id"])})
+                if recipe_result.deleted_count > 0:
+                    cleanup_stats["recipes_deleted"] += 1
+            
+            # 4. Remove from user activities
+            await user_activity_collection.update_many(
+                {},
+                {
+                    "$pull": {
+                        "favorite_dishes": dish_id,
+                        "cooked_dishes": dish_id,
+                        "viewed_dishes": dish_id,
+                        "created_dishes": dish_id
+                    }
+                }
+            )
+            
+            # 5. Finally delete the dish itself
+            await dishes_collection.delete_one({"_id": dish["_id"]})
+            cleanup_stats["dishes_deleted"] += 1
+            
+        except Exception as e:
+            cleanup_stats["errors"].append(f"Failed to delete dish {dish_id}: {str(e)}")
+            logging.error(f"Error deleting dish {dish_id}: {str(e)}")
+    
+    logging.info(f"Admin cleanup completed: {cleanup_stats}")
+    return {
+        "success": True,
+        "cleanup_stats": cleanup_stats,
+        "cutoff_date": cutoff_date.isoformat()
+    }
+
+
+async def migrate_difficulty_to_dishes_handler(decoded):
+    """
+    Admin: Migrate difficulty field from recipes to dishes
+    """
+    if not await is_admin(decoded):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    from database.mongo import recipe_collection
+    
+    migrated_count = 0
+    
+    dishes_cursor = dishes_collection.find({
+        "recipe_id": {"$exists": True, "$ne": None},
+        "difficulty": {"$exists": False}
+    })
+    
+    async for dish in dishes_cursor:
+        recipe_id = dish.get("recipe_id")
+        if recipe_id and ObjectId.is_valid(recipe_id):
+            recipe = await recipe_collection.find_one({"_id": ObjectId(recipe_id)})
+            if recipe and recipe.get("difficulty"):
+                await dishes_collection.update_one(
+                    {"_id": dish["_id"]},
+                    {"$set": {"difficulty": recipe["difficulty"]}}
+                )
+                migrated_count += 1
+    
+    return {
+        "migrated_count": migrated_count,
+        "message": f"Successfully migrated difficulty for {migrated_count} dishes"
+    }
+
+
+async def migrate_existing_images_handler(decoded):
+    """
+    Admin: Migrate existing base64 images to Cloudinary
+    """
+    if not await is_admin(decoded):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    import base64
+    import cloudinary
+    from database.mongo import recipe_collection
+    
+    migrated_dishes = 0
+    migrated_recipes = 0
+    
+    # Migrate dishes
+    dishes_cursor = dishes_collection.find({"image_b64": {"$exists": True, "$ne": None}})
+    async for dish in dishes_cursor:
+        try:
+            image_b64 = dish.get("image_b64")
+            image_mime = dish.get("image_mime", "image/jpeg")
+            
+            if image_b64:
+                image_data = base64.b64decode(image_b64)
+                upload_result = cloudinary.uploader.upload(
+                    image_data,
+                    folder="dishes",
+                    resource_type="image"
+                )
+                
+                await dishes_collection.update_one(
+                    {"_id": dish["_id"]},
+                    {
+                        "$set": {
+                            "image_url": upload_result["secure_url"],
+                            "cloudinary_public_id": upload_result["public_id"]
+                        },
+                        "$unset": {"image_b64": "", "image_mime": ""}
+                    }
+                )
+                migrated_dishes += 1
+        except Exception as e:
+            print(f"Failed to migrate dish image: {str(e)}")
+    
+    # Migrate recipes
+    recipes_cursor = recipe_collection.find({"image_b64": {"$exists": True, "$ne": None}})
+    async for recipe in recipes_cursor:
+        try:
+            image_b64 = recipe.get("image_b64")
+            image_mime = recipe.get("image_mime", "image/jpeg")
+            
+            if image_b64:
+                image_data = base64.b64decode(image_b64)
+                upload_result = cloudinary.uploader.upload(
+                    image_data,
+                    folder="recipes",
+                    resource_type="image"
+                )
+                
+                await recipe_collection.update_one(
+                    {"_id": recipe["_id"]},
+                    {
+                        "$set": {
+                            "image_url": upload_result["secure_url"],
+                            "cloudinary_public_id": upload_result["public_id"]
+                        },
+                        "$unset": {"image_b64": "", "image_mime": ""}
+                    }
+                )
+                migrated_recipes += 1
+        except Exception as e:
+            print(f"Failed to migrate recipe image: {str(e)}")
+    
+    return {
+        "migrated_dishes": migrated_dishes,
+        "migrated_recipes": migrated_recipes,
+        "message": "Image migration completed"
+    }

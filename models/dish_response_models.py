@@ -23,10 +23,10 @@ class RecipeDetailOut(BaseModel):
     difficulty: Optional[str] = None
     serves: int = 1
     creator_id: Optional[str] = None
-    created_by: str = None
-    dish_id: str = None
+    created_by: Optional[str] = None
+    dish_id: Optional[str] = None
     ratings: list = []
-    created_at: datetime = None
+    created_at: Optional[datetime] = None
 
 class DishWithRecipeDetailOut(BaseModel):
     dish: DishDetailOut
