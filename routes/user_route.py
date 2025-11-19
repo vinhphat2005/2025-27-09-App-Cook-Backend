@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from typing import Literal, Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, Body, HTTPException
 from models.user_model import UserOut
-from main_async import user_activity_col  # đã init trong main_async.py (motor)
+from database.mongo import user_activity_collection as user_activity_col
 from core.auth.dependencies import get_current_user
 from datetime import datetime, timezone
 from utils.user_handlers import (

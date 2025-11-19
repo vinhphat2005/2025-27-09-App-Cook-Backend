@@ -3,11 +3,10 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from models.dish_model import Dish, DishOut, DishIn
 from models.dish_with_recipe_model import DishWithRecipeIn, DishWithRecipeOut
 from models.dish_response_models import DishDetailOut, DishWithRecipeDetailOut, RecipeDetailOut
-from database.mongo import dishes_collection, users_collection, recipe_collection, comments_collection
-from main_async import user_activity_col  # ✅ Import for delete operations
+from database.mongo import dishes_collection, users_collection, recipe_collection, comments_collection, user_activity_collection
 
 # ✅ Alias for consistency
-user_activity_collection = user_activity_col
+user_activity_col = user_activity_collection
 recipes_collection = recipe_collection
 from bson import ObjectId
 from datetime import datetime, timezone, timedelta
@@ -98,13 +97,26 @@ def _clean_dish_data(dish_dict: dict) -> dict:
     for k in ["image_url", "creator_id", "recipe_id", "difficulty"]:
         if k in dish_dict and dish_dict[k] not in (None, "", [], {}):
             cleaned[k] = dish_dict[k]
+    
+    # ✅ Initialize all default fields for new dishes
+    current_time = datetime.now(timezone.utc)
     cleaned.setdefault("ratings", [])
     cleaned.setdefault("average_rating", 0.0)
     cleaned.setdefault("liked_by", [])
-    # ✅ Fix: Use timezone-aware datetime
-    cleaned.setdefault("created_at", datetime.now(timezone.utc))
+    cleaned.setdefault("created_at", current_time)
+    cleaned.setdefault("updated_at", current_time)
+    
+    # ✅ Initialize tracking counters
+    cleaned.setdefault("comments_count", 0)
+    cleaned.setdefault("cook_count", 0)
+    cleaned.setdefault("like_count", 0)
+    cleaned.setdefault("rating_count", 0)
+    cleaned.setdefault("view_count", 0)
+    
+    # ✅ Initialize active status
+    cleaned.setdefault("is_active", True)
+    
     return cleaned
-
 async def upload_image_to_cloudinary(image_b64: str, image_mime: str, folder: str = "dishes") -> dict:
     """
     Upload image to Cloudinary and return both secure_url and public_id

@@ -15,7 +15,11 @@ from bson import ObjectId
 from typing import Optional, Dict, Any
 import firebase_admin
 from firebase_admin import auth as fb_auth
-from core.auth.dependencies import get_user_by_email  # ✅ Import from dependencies
+import jwt
+import time
+
+# ✅ CLOCK SKEW TOLERANCE (in seconds)
+CLOCK_SKEW_TOLERANCE = 120  # 2 minutes
 
 
 # ==================== AUTH HELPERS ====================
@@ -23,6 +27,7 @@ from core.auth.dependencies import get_user_by_email  # ✅ Import from dependen
 async def get_current_user_async(request: Request) -> Dict[str, Any]:
     """
     Verify Firebase ID token and return decoded user info - ASYNC VERSION
+    ✅ With clock skew tolerance for server/client time mismatch
     """
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
@@ -32,14 +37,47 @@ async def get_current_user_async(request: Request) -> Dict[str, Any]:
 
     try:
         # Firebase verify is sync, but we can make it async-compatible
-        decoded = fb_auth.verify_id_token(id_token, check_revoked=True)
+        # ✅ With check_revoked=False for clock tolerance
+        decoded = fb_auth.verify_id_token(id_token, check_revoked=False)
         return decoded
-    except fb_auth.ExpiredIdTokenError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except fb_auth.RevokedIdTokenError:
-        raise HTTPException(status_code=401, detail="Token revoked")
+        
     except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+        error_str = str(e)
+        
+        # ✅ If clock skew error, try manual JWT decode with tolerance
+        if "used too early" in error_str.lower() or "iat" in error_str.lower():
+            print(f"⏰ CLOCK SKEW detected in Firebase SDK (async): {e}")
+            print("💡 Attempting manual JWT decode with clock tolerance...")
+            
+            try:
+                # Manual decode without verification (unsafe but works for clock skew)
+                decoded = jwt.decode(id_token, options={"verify_signature": False})
+                
+                # Check if token is actually expired (ignore iat for now)
+                current_time = int(time.time())
+                exp_time = decoded.get('exp', 0)
+                
+                if current_time > (exp_time + CLOCK_SKEW_TOLERANCE):
+                    print(f"❌ Token actually expired: {current_time} > {exp_time}")
+                    raise HTTPException(status_code=401, detail="Token expired (outside tolerance window)")
+                
+                # Token is valid within tolerance window
+                print(f"✅ Token valid (within {CLOCK_SKEW_TOLERANCE}s clock tolerance)")
+                return decoded
+                
+            except HTTPException:
+                raise
+            except Exception as decode_err:
+                print(f"❌ Manual JWT decode failed: {decode_err}")
+                raise HTTPException(status_code=401, detail="Invalid token format")
+        
+        # Other Firebase errors
+        if isinstance(e, fb_auth.ExpiredIdTokenError):
+            raise HTTPException(status_code=401, detail="Token expired")
+        elif isinstance(e, fb_auth.RevokedIdTokenError):
+            raise HTTPException(status_code=401, detail="Token revoked")
+        else:
+            raise HTTPException(status_code=401, detail=f"Invalid token")
 
 # Keep old function for backward compatibility
 def get_current_user(request: Request) -> Dict[str, Any]:

@@ -28,7 +28,7 @@ class CommentOut(BaseModel):
     liked_by: Optional[list] = []  # New: track who liked for atomic operations
     created_at: datetime
     updated_at: Optional[datetime] = None
-
+ 
 class CommentPermissionOut(BaseModel):
     """Model for comment permissions response"""
     owned: bool

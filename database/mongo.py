@@ -1,3 +1,5 @@
+# database/mongo.py
+
 import motor.motor_asyncio
 import os
 from dotenv import load_dotenv
@@ -28,3 +30,11 @@ user_social_collection = db["user_social"]  # followers, following
 user_activity_collection = db["user_activity"]  # favorites, cooked, viewed
 user_notifications_collection = db["user_notifications"]  # notifications
 user_preferences_collection = db["user_preferences"]  # reminders, preferences
+
+# ✅ Add this function for FastAPI dependency injection
+def get_database():
+    """
+    Get database instance for dependency injection in FastAPI routes
+    Returns the Motor AsyncIOMotorDatabase instance
+    """
+    return db

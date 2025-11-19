@@ -1,7 +1,7 @@
 import os
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 
-from fastapi import FastAPI, Depends, HTTPException, status, Request
+from fastapi import APIRouter, FastAPI, Depends, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
@@ -17,7 +17,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 load_dotenv()
-
+from routes.recommendation_route import router as recommendations_router
 # ==== Init Firebase Admin ====
 if not firebase_admin._apps:
     cred = credentials.ApplicationDefault()
@@ -128,6 +128,7 @@ async def init_redis():
 
 # ==== FastAPI app ====
 app = FastAPI()
+
 
 # ==== Background Scheduler ====
 scheduler = AsyncIOScheduler()
@@ -249,7 +250,8 @@ app.include_router(user_route.router, prefix="/users", tags=["Users"])
 app.include_router(dish_route.router, prefix="/dishes", tags=["Dishes"])
 app.include_router(recipe_route.router, prefix="/recipes", tags=["Recipes"])
 app.include_router(search_route.router, prefix="/search", tags=["Search"])
-app.include_router(otp_route.otp_router, tags=["OTP"])  
+app.include_router(recommendations_router, prefix="/api/recommendations", tags=["Recommendations"])
+app.include_router(otp_route.otp_router, tags=["OTP"])
 app.include_router(auth_router, tags=["Authentication"])
 
 app.add_middleware(
