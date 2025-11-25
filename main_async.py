@@ -258,6 +258,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:19006",  # Expo web
+        "http://localhost:8081",   # Expo web (Metro)
         "exp://localhost:19000",   # Expo dev client
         "http://localhost:3000",
         "http://localhost:8000"   

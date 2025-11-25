@@ -348,10 +348,15 @@ async def login_step2(request: LoginOTPRequest):
         
         # Generate custom token
         try:
+            print(f"[DEBUG] Creating custom token for firebase_uid: {firebase_uid}")
             custom_token = fb_auth.create_custom_token(firebase_uid)
             custom_token_str = custom_token.decode('utf-8')
+            print(f"[DEBUG] Custom token created successfully")
         except Exception as e:
             print(f"Custom token creation error: {e}")
+            print(f"Error type: {type(e).__name__}")
+            import traceback
+            traceback.print_exc()
             raise HTTPException(
                 status_code=500,
                 detail="Không thể tạo token đăng nhập"
