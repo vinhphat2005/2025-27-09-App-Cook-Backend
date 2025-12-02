@@ -129,6 +129,36 @@ async def init_redis():
 # ==== FastAPI app ====
 app = FastAPI()
 
+# ==== Health Check Endpoint ====
+@app.get("/")
+async def root():
+    """Root endpoint for health checks"""
+    return {
+        "status": "ok",
+        "message": "App Cook API is running",
+        "version": "1.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+@app.get("/health")
+async def health_check():
+    """Detailed health check endpoint"""
+    try:
+        # Check MongoDB connection
+        await db.command("ping")
+        mongo_status = "connected"
+    except Exception as e:
+        mongo_status = f"error: {str(e)}"
+    
+    return {
+        "status": "ok",
+        "services": {
+            "api": "running",
+            "mongodb": mongo_status,
+            "redis": "connected" if redis_client else "not configured"
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
 
 # ==== Background Scheduler ====
 scheduler = AsyncIOScheduler()
