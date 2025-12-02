@@ -254,15 +254,25 @@ app.include_router(recommendations_router, prefix="/api/recommendations", tags=[
 app.include_router(otp_route.otp_router, tags=["OTP"])
 app.include_router(auth_router, tags=["Authentication"])
 
+# Dynamic CORS based on environment
+ALLOWED_ORIGINS = [
+    "http://localhost:19006",  # Expo web
+    "http://localhost:8081",   # Expo web (Metro)
+    "exp://localhost:19000",   # Expo dev client
+    "http://localhost:3000",
+    "http://localhost:8000"   
+]
+
+# Add production frontend URL if exists
+FRONTEND_URL = os.getenv("FRONTEND_URL")
+if FRONTEND_URL:
+    ALLOWED_ORIGINS.append(FRONTEND_URL)
+    # Also allow without trailing slash
+    ALLOWED_ORIGINS.append(FRONTEND_URL.rstrip("/"))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:19006",  # Expo web
-        "http://localhost:8081",   # Expo web (Metro)
-        "exp://localhost:19000",   # Expo dev client
-        "http://localhost:3000",
-        "http://localhost:8000"   
-    ],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
