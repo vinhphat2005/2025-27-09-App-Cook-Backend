@@ -130,7 +130,7 @@ async def init_redis():
 app = FastAPI()
 
 # ==== Health Check Endpoint ====
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     """Root endpoint for health checks"""
     return {
@@ -140,7 +140,7 @@ async def root():
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     """Detailed health check endpoint"""
     try:
