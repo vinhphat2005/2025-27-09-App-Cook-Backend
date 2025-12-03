@@ -300,8 +300,19 @@ if FRONTEND_URL:
     # Also allow without trailing slash
     ALLOWED_ORIGINS.append(FRONTEND_URL.rstrip("/"))
 
+# Function to check if origin is allowed (includes Cloudflare Pages preview URLs)
+def is_allowed_origin(origin: str) -> bool:
+    """Check if origin is allowed, including Cloudflare Pages preview deployments"""
+    if origin in ALLOWED_ORIGINS:
+        return True
+    # Allow all Cloudflare Pages preview deployments (*.pages.dev)
+    if origin.endswith(".2025-27-09-app-cook-frontend.pages.dev"):
+        return True
+    return False
+
 app.add_middleware(
     CORSMiddleware,
+    allow_origin_regex=r"https://.*\.2025-27-09-app-cook-frontend\.pages\.dev",
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
