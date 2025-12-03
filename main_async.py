@@ -20,10 +20,31 @@ load_dotenv()
 from routes.recommendation_route import router as recommendations_router
 # ==== Init Firebase Admin ====
 if not firebase_admin._apps:
-    cred = credentials.ApplicationDefault()
-    firebase_admin.initialize_app(cred, {
-        "projectId": os.getenv("FIREBASE_PROJECT_ID")
-    })
+    # Try to read from FIREBASE_CREDENTIALS env var (for production)
+    firebase_creds_json = os.getenv("FIREBASE_CREDENTIALS")
+    if firebase_creds_json:
+        import json
+        cred_dict = json.loads(firebase_creds_json)
+        cred = credentials.Certificate(cred_dict)
+        firebase_admin.initialize_app(cred, {
+            "projectId": os.getenv("FIREBASE_PROJECT_ID")
+        })
+        print("✅ Firebase initialized from FIREBASE_CREDENTIALS env var")
+    else:
+        # Fallback to serviceAccountKey.json (for local development)
+        try:
+            cred = credentials.Certificate("./serviceAccountKey.json")
+            firebase_admin.initialize_app(cred, {
+                "projectId": os.getenv("FIREBASE_PROJECT_ID")
+            })
+            print("✅ Firebase initialized from serviceAccountKey.json")
+        except FileNotFoundError:
+            # Last resort: use ApplicationDefault (for GCP environments)
+            cred = credentials.ApplicationDefault()
+            firebase_admin.initialize_app(cred, {
+                "projectId": os.getenv("FIREBASE_PROJECT_ID")
+            })
+            print("✅ Firebase initialized with ApplicationDefault")
 
 # ==== Init MongoDB (ASYNC ONLY) ====
 MONGODB_URI = os.getenv("MONGODB_URI")
