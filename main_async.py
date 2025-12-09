@@ -192,7 +192,11 @@ async def auto_cleanup_deleted_dishes():
     This runs daily at 2:00 AM server time.
     """
     try:
-        from routes.dish_route import dishes_collection, comments_collection, recipe_collection
+        # Use collections from db (already initialized)
+        dishes_collection = db["dishes"]
+        comments_collection = db["comments"]
+        recipe_collection = db["recipes"]
+        
         import cloudinary
         
         CLOUDINARY_ENABLED = os.getenv("CLOUDINARY_ENABLED", "false").lower() == "true"
@@ -267,9 +271,8 @@ async def startup_event():
     """Initialize services on startup"""
     await init_redis()
     
-    # Run cleanup immediately on startup (catch-up for any missed jobs)
-    logging.info("🧹 Running startup cleanup check...")
-    await auto_cleanup_deleted_dishes()
+    # Don't run cleanup on startup to avoid blocking requests
+    # Scheduler will handle it at scheduled time (2:00 AM daily)
     
     # Start background scheduler
     if not scheduler.running:

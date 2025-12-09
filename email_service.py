@@ -1,34 +1,21 @@
 """
-Email Service for OTP Verification
-Supports multiple email providers: Resend, SendGrid, SMTP
+Email Service for OTP Verification - Resend Only
+Simplified for production use with Resend API
 """
-import smtplib
-import ssl
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from typing import Optional
 import os
 from datetime import datetime
 
-# Try to import Resend (preferred method)
+# Import Resend (required)
 try:
     import resend
     RESEND_AVAILABLE = True
 except ImportError:
     RESEND_AVAILABLE = False
-    print("⚠️ Resend not installed. Install with: pip install resend")
+    print("❌ CRITICAL: Resend not installed. Run: pip install resend")
 
-# Email configuration từ environment variables
-EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "smtp")  # "resend", "sendgrid", or "smtp"
+# Email configuration
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@appcook.com")
-
-# SMTP configuration (fallback)
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER")
-SMTP_PASS = os.getenv("SMTP_PASS")
+EMAIL_FROM = os.getenv("EMAIL_FROM", "onboarding@resend.dev")
 
 async def send_otp_email(
     email: str, 
@@ -37,75 +24,33 @@ async def send_otp_email(
     expires_minutes: int = 10
 ) -> bool:
     """
-    Send OTP email using configured provider
-    
-    Priority order:
-    1. Resend (if RESEND_API_KEY is set) - RECOMMENDED for production
-    2. SendGrid (if EMAIL_PROVIDER=sendgrid)
-    3. SMTP (fallback)
+    Send OTP email using Resend API ONLY
     
     Args:
         email: Recipient email
         otp_code: 6-digit OTP code
         purpose: "register" or "login"
-        expires_minutes: OTP expiry time
+        expires_minutes: OTP expiry time (default 10 minutes)
         
     Returns:
         bool: True if sent successfully, False otherwise
     """
+    # Validation checks
+    if not RESEND_API_KEY:
+        print("❌ RESEND_API_KEY not configured in environment")
+        return False
+    
+    if not RESEND_AVAILABLE:
+        print("❌ Resend package not installed")
+        return False
+    
     try:
-        # Priority 1: Try Resend first (works on Render!)
-        if RESEND_API_KEY and RESEND_AVAILABLE:
-            print("📧 Using Resend API...")
-            return await send_otp_resend(email, otp_code, purpose, expires_minutes)
-        
-        # Priority 2: SendGrid
-        elif EMAIL_PROVIDER == "sendgrid":
-            print("📧 Using SendGrid API...")
-            return await send_otp_sendgrid(email, otp_code, purpose, expires_minutes)
-        
-        # Priority 3: SMTP (may be blocked on Render Free Tier)
-        else:
-            print("📧 Using SMTP...")
-            return await send_otp_smtp(email, otp_code, purpose, expires_minutes)
-            
+        print(f"📧 Sending OTP via Resend to {email}...")
+        return await send_otp_resend(email, otp_code, purpose, expires_minutes)
     except Exception as e:
         print(f"❌ Email sending error: {e}")
-        return False
-
-async def send_otp_sendgrid(
-    email: str, 
-    otp_code: str, 
-    purpose: str,
-    expires_minutes: int
-) -> bool:
-    """Send OTP via SendGrid"""
-    try:
-        import sendgrid
-        from sendgrid.helpers.mail import Mail, To
-        
-        if not SENDGRID_API_KEY:
-            print("❌ SendGrid API key not configured")
-            return False
-        
-        sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
-        
-        subject = get_email_subject(purpose)
-        html_content = get_email_html(otp_code, purpose, expires_minutes)
-        
-        message = Mail(
-            from_email=EMAIL_FROM,
-            to_emails=To(email),
-            subject=subject,
-            html_content=html_content
-        )
-        
-        response = sg.send(message)
-        print(f"✅ SendGrid response: {response.status_code}")
-        return response.status_code == 202
-        
-    except Exception as e:
-        print(f"❌ SendGrid error: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 async def send_otp_resend(
@@ -115,25 +60,10 @@ async def send_otp_resend(
     expires_minutes: int = 10
 ) -> bool:
     """
-    Send OTP via Resend API (RECOMMENDED for Render)
-    
-    Resend uses HTTPS API instead of SMTP, so it works on Render Free Tier!
-    
-    Setup:
-    1. Sign up at https://resend.com/signup (Free 100 emails/day)
-    2. Get API key from Dashboard
-    3. Add to Render env: RESEND_API_KEY=re_xxxxxxxxxxxx
-    4. Set EMAIL_FROM to your verified domain email (or use onboarding@resend.dev)
+    Send OTP via Resend API
+    Uses HTTPS (port 443) - works on Render Free Tier
     """
     try:
-        if not RESEND_API_KEY:
-            print("❌ RESEND_API_KEY not configured")
-            return False
-        
-        if not RESEND_AVAILABLE:
-            print("❌ Resend package not installed. Run: pip install resend")
-            return False
-        
         resend.api_key = RESEND_API_KEY
         
         subject = get_email_subject(purpose)
@@ -148,69 +78,13 @@ async def send_otp_resend(
         }
         
         response = resend.Emails.send(params)
-        print(f"✅ Resend email sent successfully: {response}")
+        print(f"✅ Resend response: {response}")
         return True
         
     except Exception as e:
         print(f"❌ Resend error: {e}")
-        return False
-
-async def send_otp_smtp(
-    email: str, 
-    otp_code: str, 
-    purpose: str,
-    expires_minutes: int
-) -> bool:
-    """Send OTP via SMTP"""
-    try:
-        # Re-read environment variables (for runtime changes)
-        smtp_user = os.getenv("SMTP_USER")
-        smtp_pass = os.getenv("SMTP_PASS")
-        
-        if not smtp_user or not smtp_pass:
-            # Development mode - just log the OTP
-            print(f"\n{'='*50}")
-            print(f"📧 OTP EMAIL (Development Mode)")
-            print(f"To: {email}")
-            print(f"Purpose: {purpose}")
-            print(f"OTP Code: {otp_code}")
-            print(f"Expires in: {expires_minutes} minutes")
-            print(f"{'='*50}\n")
-            return True
-        
-        # Production SMTP sending with beautiful HTML format
-        smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
-        smtp_port = int(os.getenv("SMTP_PORT", "587"))
-        email_from = os.getenv("EMAIL_FROM", "noreply@appcook.com")
-        
-        message = MIMEMultipart("alternative")
-        message["Subject"] = get_email_subject(purpose)
-        message["From"] = email_from
-        message["To"] = email
-        
-        # Create both plain text and HTML content
-        plain_content = get_email_plain_text(otp_code, purpose, expires_minutes)
-        html_content = get_email_html(otp_code, purpose, expires_minutes)
-        
-        # Create plain text and HTML parts
-        text_part = MIMEText(plain_content, "plain", "utf-8")
-        html_part = MIMEText(html_content, "html", "utf-8")
-        
-        # Attach both parts
-        message.attach(text_part)
-        message.attach(html_part)
-        
-        # Create secure connection and send
-        context = ssl.create_default_context()
-        with smtplib.SMTP(smtp_host, smtp_port) as server:
-            server.starttls(context=context)
-            server.login(smtp_user, smtp_pass)
-            server.sendmail(email_from, email, message.as_string())
-        
-        return True
-        
-    except Exception as e:
-        print(f"SMTP error: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def get_email_subject(purpose: str) -> str:
@@ -221,87 +95,6 @@ def get_email_subject(purpose: str) -> str:
         return "Đăng nhập - Mã OTP"
     else:
         return "Mã xác thực OTP"
-
-def get_email_plain_text(otp_code: str, purpose: str, expires_minutes: int) -> str:
-    """Generate plain text email content (to avoid Gmail interference)"""
-    
-    if purpose == "register":
-        title = "XÁC THỰC TÀI KHOẢN"
-        description = "Bạn đang tạo tài khoản mới. Vui lòng sử dụng mã OTP bên dưới để hoàn tất đăng ký:"
-    else:
-        title = "ĐĂNG NHẬP TÀI KHOẢN"
-        description = "Bạn đang đăng nhập vào tài khoản. Vui lòng sử dụng mã OTP bên dưới:"
-    
-    plain_text = f"""
-🍳 APP COOK
-{title}
-
-Xin chào,
-
-{description}
-
-===================================
-     MÃ XÁC THỰC OTP CỦA BẠN:
-           {otp_code}
-===================================
-
-Mã có hiệu lực trong {expires_minutes} phút
-
-⚠️ LƯU Ý BẢO MẬT:
-• Không chia sẻ mã này với bất kỳ ai
-• Mã chỉ có hiệu lực trong {expires_minutes} phút  
-• Nếu bạn không yêu cầu mã này, vui lòng bỏ qua email
-
-💡 MẸO BẢO MẬT:
-App Cook sẽ không bao giờ yêu cầu bạn cung cấp mã OTP 
-qua điện thoại hoặc email khác. Chỉ nhập mã này trên 
-ứng dụng chính thức của chúng tôi.
-
----
-Email này được gửi tự động từ hệ thống App Cook
-Thời gian: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
-Hỗ trợ: support@appcook.com
-"""
-    
-    return plain_text.strip()
-
-def get_email_pure_text(otp_code: str, purpose: str, expires_minutes: int) -> str:
-    """Generate PURE TEXT email content (no emojis, no special chars)"""
-    
-    if purpose == "register":
-        title = "XAC THUC TAI KHOAN"
-        description = "Ban dang tao tai khoan moi. Vui long su dung ma OTP ben duoi de hoan tat dang ky:"
-    else:
-        title = "DANG NHAP TAI KHOAN"  
-        description = "Ban dang dang nhap vao tai khoan. Vui long su dung ma OTP ben duoi:"
-    
-    # PURE TEXT - no emojis, no special formatting
-    pure_text = f"""App Cook - {title}
-
-Xin chao,
-
-{description}
-
-Ma xac thuc OTP cua ban: {otp_code}
-
-Ma co hieu luc trong {expires_minutes} phut.
-
-LUU Y BAO MAT:
-- Khong chia se ma nay voi bat ky ai
-- Ma chi co hieu luc trong {expires_minutes} phut  
-- Neu ban khong yeu cau ma nay, vui long bo qua email
-
-MEO BAO MAT:
-App Cook se khong bao gio yeu cau ban cung cap ma OTP 
-qua dien thoai hoac email khac. Chi nhap ma nay tren 
-ung dung chinh thuc cua chung toi.
-
----
-Email nay duoc gui tu dong tu he thong App Cook
-Thoi gian: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
-Ho tro: support@appcook.com"""
-    
-    return pure_text.strip()
 
 def get_email_html(otp_code: str, purpose: str, expires_minutes: int) -> str:
     """Generate HTML email content"""
@@ -442,19 +235,3 @@ def get_email_html(otp_code: str, purpose: str, expires_minutes: int) -> str:
     """
     
     return html
-
-# Test function
-async def test_email_service():
-    """Test email service configuration"""
-    test_email = "test@example.com"
-    test_otp = "123456"
-    
-    print("Testing email service...")
-    result = await send_otp_email(test_email, test_otp, "register", 10)
-    print(f"Email test result: {result}")
-    
-    return result
-
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(test_email_service())
