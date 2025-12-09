@@ -440,10 +440,6 @@ async def log_requests(request: Request, call_next):
 
 # ==== Routes (ALL ASYNC) ====
 
-@app.api_route("/health", methods=["GET", "HEAD"])
-async def health():
-    return {"ok": True, "async": True}
-
 @app.get("/me")
 async def me(decoded=Depends(get_current_user)):
     """
