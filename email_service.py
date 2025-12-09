@@ -1,6 +1,6 @@
 """
 Email Service for OTP Verification
-Supports multiple email providers: SendGrid, SMTP, etc.
+Supports multiple email providers: Resend, SendGrid, SMTP
 """
 import smtplib
 import ssl
@@ -10,12 +10,21 @@ from typing import Optional
 import os
 from datetime import datetime
 
+# Try to import Resend (preferred method)
+try:
+    import resend
+    RESEND_AVAILABLE = True
+except ImportError:
+    RESEND_AVAILABLE = False
+    print("⚠️ Resend not installed. Install with: pip install resend")
+
 # Email configuration từ environment variables
-EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "smtp")  # "sendgrid" or "smtp"
+EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "smtp")  # "resend", "sendgrid", or "smtp"
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@appcook.com")
 
-# SMTP configuration
+# SMTP configuration (fallback)
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER")
@@ -30,6 +39,11 @@ async def send_otp_email(
     """
     Send OTP email using configured provider
     
+    Priority order:
+    1. Resend (if RESEND_API_KEY is set) - RECOMMENDED for production
+    2. SendGrid (if EMAIL_PROVIDER=sendgrid)
+    3. SMTP (fallback)
+    
     Args:
         email: Recipient email
         otp_code: 6-digit OTP code
@@ -40,12 +54,23 @@ async def send_otp_email(
         bool: True if sent successfully, False otherwise
     """
     try:
-        if EMAIL_PROVIDER == "sendgrid":
+        # Priority 1: Try Resend first (works on Render!)
+        if RESEND_API_KEY and RESEND_AVAILABLE:
+            print("📧 Using Resend API...")
+            return await send_otp_resend(email, otp_code, purpose, expires_minutes)
+        
+        # Priority 2: SendGrid
+        elif EMAIL_PROVIDER == "sendgrid":
+            print("📧 Using SendGrid API...")
             return await send_otp_sendgrid(email, otp_code, purpose, expires_minutes)
+        
+        # Priority 3: SMTP (may be blocked on Render Free Tier)
         else:
+            print("📧 Using SMTP...")
             return await send_otp_smtp(email, otp_code, purpose, expires_minutes)
+            
     except Exception as e:
-        print(f"Email sending error: {e}")
+        print(f"❌ Email sending error: {e}")
         return False
 
 async def send_otp_sendgrid(
@@ -60,7 +85,7 @@ async def send_otp_sendgrid(
         from sendgrid.helpers.mail import Mail, To
         
         if not SENDGRID_API_KEY:
-            print("SendGrid API key not configured")
+            print("❌ SendGrid API key not configured")
             return False
         
         sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
@@ -76,10 +101,58 @@ async def send_otp_sendgrid(
         )
         
         response = sg.send(message)
+        print(f"✅ SendGrid response: {response.status_code}")
         return response.status_code == 202
         
     except Exception as e:
-        print(f"SendGrid error: {e}")
+        print(f"❌ SendGrid error: {e}")
+        return False
+
+async def send_otp_resend(
+    email: str,
+    otp_code: str,
+    purpose: str,
+    expires_minutes: int = 10
+) -> bool:
+    """
+    Send OTP via Resend API (RECOMMENDED for Render)
+    
+    Resend uses HTTPS API instead of SMTP, so it works on Render Free Tier!
+    
+    Setup:
+    1. Sign up at https://resend.com/signup (Free 100 emails/day)
+    2. Get API key from Dashboard
+    3. Add to Render env: RESEND_API_KEY=re_xxxxxxxxxxxx
+    4. Set EMAIL_FROM to your verified domain email (or use onboarding@resend.dev)
+    """
+    try:
+        if not RESEND_API_KEY:
+            print("❌ RESEND_API_KEY not configured")
+            return False
+        
+        if not RESEND_AVAILABLE:
+            print("❌ Resend package not installed. Run: pip install resend")
+            return False
+        
+        resend.api_key = RESEND_API_KEY
+        
+        subject = get_email_subject(purpose)
+        html = get_email_html(otp_code, purpose, expires_minutes)
+        
+        # Send via Resend
+        params = {
+            "from": EMAIL_FROM,
+            "to": [email],
+            "subject": subject,
+            "html": html,
+        }
+        
+        response = resend.Emails.send(params)
+        print(f"✅ Resend email sent successfully: {response}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Resend error: {e}")
         return False
 
 async def send_otp_smtp(

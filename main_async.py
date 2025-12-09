@@ -162,8 +162,12 @@ async def root():
     }
 
 @app.api_route("/health", methods=["GET", "HEAD"])
-async def health_check():
+async def health_check(request: Request):
     """Detailed health check endpoint"""
+    # Log UptimeRobot pings
+    client_ip = request.client.host if request.client else "unknown"
+    print(f"🏓 Health check from {client_ip} at {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
+    
     try:
         # Check MongoDB connection
         await db.command("ping")
